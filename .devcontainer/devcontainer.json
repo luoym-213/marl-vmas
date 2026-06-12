@@ -1,0 +1,27 @@
+{
+    "name": "marl-vmas",
+
+    "image": "marl-vmas-cpu",
+
+    "workspaceFolder": "/workspace",
+
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind"
+    ],
+
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "python.defaultInterpreterPath": "/usr/local/bin/python"
+            },
+
+            "extensions": [
+                "ms-python.python",
+                "ms-python.debugpy",
+                "ms-toolsai.jupyter",
+                "njpwerner.autodocstring"
+            ]
+        }
+    }
+}

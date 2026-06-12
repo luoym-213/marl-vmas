@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "custom-vmas-benchmarl"
+version = "0.1.0"
+description = "Structured VMAS and BenchMARL tutorial project converted from the Colab notebook."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "vmas",
+    "benchmarl",
+    "torchrl",
+    "moviepy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+render = ["pyvirtualdisplay", "av<14"]
+gnn = ["torch-geometric", "torch-cluster"]
+
+[tool.setuptools.packages.find]
+include = ["custom_vmas_benchmarl*"]

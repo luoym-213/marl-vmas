@@ -1,0 +1,8 @@
+max_steps: 100
+n_agents_holonomic: 4
+n_agents_diff_drive: 0
+n_agents_car: 0
+n_obstacles: 2
+lidar_range: 0
+comms_rendering_range: 1
+shared_rew: false
