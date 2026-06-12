@@ -1,0 +1,15 @@
+torch
+vmas
+benchmarl
+torchrl
+moviepy
+pyyaml
+
+# Optional rendering helpers for headless Linux/Colab.
+pyvirtualdisplay
+av<14
+
+# Optional GNN training dependencies.
+# Install torch-cluster with the wheel URL matching your torch/cuda version:
+# https://data.pyg.org/whl/
+torch-geometric

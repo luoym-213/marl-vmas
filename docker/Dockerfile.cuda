@@ -2,7 +2,7 @@
 FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 # =====================
-# 基础环境
+# ????????????
 # =====================
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -19,21 +19,23 @@ RUN apt-get update && apt-get install -y \
     xvfb \
     libgl1 \
     libglib2.0-0 \
+    libglu1-mesa \
+    python3-opengl \
     && rm -rf /var/lib/apt/lists/*
 
 
-# 默认 python 指向 python3.10
+# ?????? python ?????? python3.10
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python
 
 
 # =====================
-# Python工具
+# Python??????
 # =====================
 RUN python -m pip install --upgrade pip setuptools wheel
 
 
 # =====================
-# PyTorch CUDA版本
+# PyTorch CUDA??????
 # =====================
 RUN pip install \
     torch \
@@ -42,7 +44,7 @@ RUN pip install \
     --index-url https://download.pytorch.org/whl/cu121
 
 # =====================
-# 项目依赖
+# ????????????
 # =====================
 COPY docker/requirements.txt .
 
