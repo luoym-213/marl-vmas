@@ -1,0 +1,61 @@
+# CUDA 12.4 + Ubuntu 22.04
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+
+# =====================
+# 基础环境
+# =====================
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /workspace
+
+
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    git \
+    build-essential \
+    ffmpeg \
+    xvfb \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# 默认 python 指向 python3.10
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
+
+# =====================
+# Python工具
+# =====================
+RUN python -m pip install --upgrade pip setuptools wheel
+
+
+# =====================
+# PyTorch CUDA版本
+# =====================
+RUN pip install \
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+
+# =====================
+# 项目依赖
+# =====================
+COPY requirements.txt .
+
+RUN pip install -r requirements.txt
+
+COPY . .
+
+RUN pip install -e third_party/VectorizedMultiAgentSimulator
+
+RUN pip install -e third_party/BenchMARL
+
+RUN pip install -e .
+
+CMD ["/bin/bash"]

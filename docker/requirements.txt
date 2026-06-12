@@ -1,0 +1,12 @@
+torchrl==0.7.2
+
+hydra-core
+tqdm
+av
+matplotlib
+imageio
+imageio-ffmpeg
+moviepy
+tensorboard
+pyyaml
+numpy
