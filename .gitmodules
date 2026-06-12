@@ -1,3 +1,6 @@
 [submodule "third_party/BenchMARL"]
 	path = third_party/BenchMARL
 	url = git@github.com:facebookresearch/BenchMARL.git
+[submodule "third_party/VectorizedMultiAgentSimulator"]
+	path = third_party/VectorizedMultiAgentSimulator
+	url = git@github.com:proroklab/VectorizedMultiAgentSimulator.git
