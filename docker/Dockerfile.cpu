@@ -22,6 +22,4 @@ RUN pip install -e third_party/VectorizedMultiAgentSimulator
 
 RUN pip install -e third_party/BenchMARL
 
-RUN pip install -e .
-
 CMD ["/bin/bash"]
