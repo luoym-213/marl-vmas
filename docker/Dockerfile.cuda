@@ -1,5 +1,5 @@
-# CUDA 12.1 + cuDNN8 + Ubuntu 22.04
-FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+# CUDA 12.3 + cuDNN + Ubuntu 22.04
+FROM nvidia/cuda:12.3.2-cudnn9-devel-ubuntu22.04
 
 # =====================
 # 基础环境
@@ -36,10 +36,10 @@ RUN python -m pip install --upgrade pip setuptools wheel
 # PyTorch CUDA版本
 # =====================
 RUN pip install \
-    torch \
-    torchvision \
-    torchaudio \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # =====================
 # 项目依赖
