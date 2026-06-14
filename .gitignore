@@ -1,0 +1,15 @@
+
+# Python cache
+
+__pycache__/
+
+*.py[cod]
+
+*$py.class
+
+# Training / experiment outputs
+
+projects/CustormVmasBenchmarl/outputs/
+
+projects/CustormVmasBenchmarl/mappo_navigation_mlp__*/
+
