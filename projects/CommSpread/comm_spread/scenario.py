@@ -61,6 +61,8 @@ class CommSpreadScenario(BaseScenario):
         world = World(
             batch_dim,
             device,
+            x_semidim=self.world_spawning_x,
+            y_semidim=self.world_spawning_y,
             substeps=5,
             collision_force=500,
             dt=0.1,
