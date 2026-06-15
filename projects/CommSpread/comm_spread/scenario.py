@@ -28,6 +28,8 @@ class CommSpreadScenario(BaseScenario):
     Agents are homogeneous holonomic discs. Landmarks are shared team targets,
     not agent-specific goals. The dense reward is the negative sum of each
     landmark's distance to its nearest agent, plus local collision penalties.
+    The dense spread reward uses the one-step decrease in that distance sum, so
+    agents are rewarded when they move the team closer to landmark coverage.
     """
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
@@ -114,8 +116,20 @@ class CommSpreadScenario(BaseScenario):
         self.spread_rew = torch.zeros(batch_dim, device=device)
         self.all_landmarks_covered = torch.zeros(batch_dim, dtype=torch.bool, device=device)
         self.landmark_min_dists = torch.zeros(batch_dim, self.n_landmarks, device=device)
+        self.previous_landmark_dist_sum = torch.zeros(batch_dim, device=device)
 
         return world
+
+    def _compute_landmark_min_dists(self) -> Tensor:
+        agents_pos = torch.stack(
+            [current_agent.state.pos for current_agent in self.world.agents],
+            dim=1,
+        )
+        landmarks_pos = torch.stack(
+            [landmark.state.pos for landmark in self.landmarks],
+            dim=1,
+        )
+        return torch.cdist(agents_pos, landmarks_pos).min(dim=1).values
 
     def reset_world_at(self, env_index: int | None = None) -> None:
         ScenarioUtils.spawn_entities_randomly(
@@ -127,29 +141,28 @@ class CommSpreadScenario(BaseScenario):
             y_bounds=(-self.world_spawning_y, self.world_spawning_y),
         )
 
+        landmark_min_dists = self._compute_landmark_min_dists()
         if env_index is None:
             self.all_landmarks_covered[:] = False
-            self.landmark_min_dists[:] = 0
+            self.landmark_min_dists[:] = landmark_min_dists
+            self.previous_landmark_dist_sum[:] = landmark_min_dists.sum(dim=-1)
         else:
             self.all_landmarks_covered[env_index] = False
-            self.landmark_min_dists[env_index] = 0
+            self.landmark_min_dists[env_index] = landmark_min_dists[env_index]
+            self.previous_landmark_dist_sum[env_index] = landmark_min_dists[
+                env_index
+            ].sum()
 
     def reward(self, agent: Agent) -> Tensor:
         is_first = agent == self.world.agents[0]
 
         if is_first:
-            agents_pos = torch.stack(
-                [current_agent.state.pos for current_agent in self.world.agents],
-                dim=1,
+            self.landmark_min_dists = self._compute_landmark_min_dists()
+            landmark_dist_sum = self.landmark_min_dists.sum(dim=-1)
+            self.spread_rew = self.distance_reward_scale * (
+                self.previous_landmark_dist_sum - landmark_dist_sum
             )
-            landmarks_pos = torch.stack(
-                [landmark.state.pos for landmark in self.landmarks],
-                dim=1,
-            )
-
-            agent_landmark_dists = torch.cdist(agents_pos, landmarks_pos)
-            self.landmark_min_dists = agent_landmark_dists.min(dim=1).values
-            self.spread_rew = -self.distance_reward_scale * self.landmark_min_dists.sum(dim=-1)
+            self.previous_landmark_dist_sum[:] = landmark_dist_sum
             self.all_landmarks_covered = torch.all(
                 self.landmark_min_dists <= self.coverage_radius,
                 dim=-1,

@@ -95,10 +95,10 @@ def build_mappo_config():
     return MappoConfig(
         share_param_critic=True,
         clip_epsilon=0.2,
-        entropy_coef=0.001,
+        entropy_coef=0.01,
         critic_coef=1,
         loss_critic_type="l2",
-        lmbda=0.9,
+        lmbda=0.95,
         scale_mapping="biased_softplus_1.0",
         use_tanh_normal=True,
         minibatch_advantage=False,
