@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--restore-file", default=None)
     parser.add_argument("--restore-map-location", default=None)
     parser.add_argument(
+        "--max-n-frames",
+        type=int,
+        default=None,
+        help="Override the total frame target, useful when resuming from a checkpoint.",
+    )
+    parser.add_argument(
         "--full",
         action="store_true",
         help="Run the long training setup instead of the quick smoke run.",
@@ -65,6 +71,7 @@ def main() -> None:
             save_folder=args.save_folder,
             restore_file=args.restore_file,
             restore_map_location=args.restore_map_location,
+            max_n_frames=args.max_n_frames,
         ),
     )
     experiment.run()

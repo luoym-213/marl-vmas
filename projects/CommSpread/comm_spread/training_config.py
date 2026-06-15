@@ -61,6 +61,7 @@ def build_experiment_config(
     save_folder: str = "outputs",
     restore_file: str | None = None,
     restore_map_location: str | None = None,
+    max_n_frames: int | None = None,
 ):
     from benchmarl.experiment import ExperimentConfig
 
@@ -98,6 +99,9 @@ def build_experiment_config(
         config.on_policy_minibatch_size = 4096
         config.evaluation_interval = 120_000
         config.evaluation_episodes = 200
+
+    if max_n_frames is not None:
+        config.max_n_frames = max_n_frames
 
     return config
 
