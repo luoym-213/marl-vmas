@@ -162,8 +162,8 @@ class CommSpreadScenario(BaseScenario):
             for current_agent in self.world.agents:
                 pos = current_agent.state.pos
                 out_of_bounds = (
-                    (pos[..., 0].abs() > self.world_spawning_x)
-                    | (pos[..., 1].abs() > self.world_spawning_y)
+                    (pos[..., 0].abs() + self.agent_radius > self.world_spawning_x)
+                    | (pos[..., 1].abs() + self.agent_radius > self.world_spawning_y)
                 )
                 current_agent.out_of_bounds_rew[
                     out_of_bounds
