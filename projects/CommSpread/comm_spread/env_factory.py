@@ -16,6 +16,7 @@ DEFAULT_SCENARIO_CONFIG: dict[str, Any] = {
     "done_when_all_covered": False,
     "coverage_radius": 0.1,
     "collision_penalty": -1.0,
+    "out_of_bounds_penalty": -1.0,
     "distance_reward_scale": 1.0,
     "comms_rendering_range": 0.0,
 }
