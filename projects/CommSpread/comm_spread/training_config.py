@@ -18,6 +18,8 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "collision_penalty": -1.0,
         "out_of_bounds_penalty": -1.0,
         "distance_reward_scale": 1.0,
+        "coverage_reward": 1.0,
+        "success_reward": 20.0,
         "comms_rendering_range": 0.0,
     },
     "spread_early_done": {
@@ -30,6 +32,8 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "collision_penalty": -1.0,
         "out_of_bounds_penalty": -1.0,
         "distance_reward_scale": 1.0,
+        "coverage_reward": 1.0,
+        "success_reward": 20.0,
         "comms_rendering_range": 0.0,
     },
     "spread_gnn": {
@@ -42,6 +46,8 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "collision_penalty": -1.0,
         "out_of_bounds_penalty": -1.0,
         "distance_reward_scale": 1.0,
+        "coverage_reward": 1.0,
+        "success_reward": 20.0,
         "comms_rendering_range": 1.0,
     },
 }
@@ -53,6 +59,8 @@ def build_experiment_config(
     sampling_device: str,
     quick: bool,
     save_folder: str = "outputs",
+    restore_file: str | None = None,
+    restore_map_location: str | None = None,
 ):
     from benchmarl.experiment import ExperimentConfig
 
@@ -68,6 +76,11 @@ def build_experiment_config(
     config.checkpoint_at_end = True
     config.keep_checkpoints_num = 5
     config.loggers = ["csv"]
+
+    if restore_file is not None:
+        config.restore_file = restore_file
+    if restore_map_location is not None:
+        config.restore_map_location = restore_map_location
 
     if quick:
         config.max_n_frames = 6_000

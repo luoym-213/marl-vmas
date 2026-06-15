@@ -18,6 +18,8 @@ DEFAULT_SCENARIO_CONFIG: dict[str, Any] = {
     "collision_penalty": -1.0,
     "out_of_bounds_penalty": -1.0,
     "distance_reward_scale": 1.0,
+    "coverage_reward": 1.0,
+    "success_reward": 20.0,
     "comms_rendering_range": 0.0,
 }
 

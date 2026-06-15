@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-device", default="cpu")
     parser.add_argument("--sampling-device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--restore-file", default=None)
+    parser.add_argument("--restore-map-location", default=None)
     parser.add_argument(
         "--full",
         action="store_true",
@@ -61,6 +63,8 @@ def main() -> None:
             sampling_device=args.sampling_device,
             quick=not args.full,
             save_folder=args.save_folder,
+            restore_file=args.restore_file,
+            restore_map_location=args.restore_map_location,
         ),
     )
     experiment.run()

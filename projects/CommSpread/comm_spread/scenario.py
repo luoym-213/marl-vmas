@@ -54,6 +54,8 @@ class CommSpreadScenario(BaseScenario):
         self.collision_penalty = kwargs.pop("collision_penalty", -1.0)
         self.out_of_bounds_penalty = kwargs.pop("out_of_bounds_penalty", -1.0)
         self.distance_reward_scale = kwargs.pop("distance_reward_scale", 1.0)
+        self.coverage_reward = kwargs.pop("coverage_reward", 1.0)
+        self.success_reward = kwargs.pop("success_reward", 20.0)
         self.shared_rew = kwargs.pop("shared_rew", False)
         self.done_when_all_covered = kwargs.pop("done_when_all_covered", False)
         self.observe_other_velocities = kwargs.pop("observe_other_velocities", False)
@@ -114,6 +116,8 @@ class CommSpreadScenario(BaseScenario):
             self.landmarks.append(landmark)
 
         self.spread_rew = torch.zeros(batch_dim, device=device)
+        self.coverage_rew = torch.zeros(batch_dim, device=device)
+        self.success_rew = torch.zeros(batch_dim, device=device)
         self.all_landmarks_covered = torch.zeros(batch_dim, dtype=torch.bool, device=device)
         self.landmark_min_dists = torch.zeros(batch_dim, self.n_landmarks, device=device)
         self.previous_landmark_dist_sum = torch.zeros(batch_dim, device=device)
@@ -163,10 +167,13 @@ class CommSpreadScenario(BaseScenario):
                 self.previous_landmark_dist_sum - landmark_dist_sum
             )
             self.previous_landmark_dist_sum[:] = landmark_dist_sum
+            covered_landmarks = self.landmark_min_dists <= self.coverage_radius
+            self.coverage_rew = self.coverage_reward * covered_landmarks.float().sum(dim=-1)
             self.all_landmarks_covered = torch.all(
-                self.landmark_min_dists <= self.coverage_radius,
+                covered_landmarks,
                 dim=-1,
             )
+            self.success_rew = self.success_reward * self.all_landmarks_covered.float()
 
             for current_agent in self.world.agents:
                 current_agent.collision_rew[:] = 0
@@ -199,7 +206,13 @@ class CommSpreadScenario(BaseScenario):
         else:
             collision_rew = agent.collision_rew
             out_of_bounds_rew = agent.out_of_bounds_rew
-        return self.spread_rew + collision_rew + out_of_bounds_rew
+        return (
+            self.spread_rew
+            + self.coverage_rew
+            + self.success_rew
+            + collision_rew
+            + out_of_bounds_rew
+        )
 
     def observation(self, agent: Agent) -> Dict[str, Tensor]:
         landmark_rel_pos = [
@@ -237,6 +250,8 @@ class CommSpreadScenario(BaseScenario):
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         return {
             "spread_rew": self.spread_rew,
+            "coverage_rew": self.coverage_rew,
+            "success_rew": self.success_rew,
             "collision_rew": (
                 sum(a.collision_rew for a in self.world.agents)
                 if self.shared_rew
