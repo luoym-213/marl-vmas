@@ -1,0 +1,9 @@
+max_steps: 100
+n_agents: 3
+n_landmarks: 3
+shared_rew: false
+done_when_all_covered: false
+coverage_radius: 0.1
+collision_penalty: -1.0
+distance_reward_scale: 1.0
+comms_rendering_range: 0.0

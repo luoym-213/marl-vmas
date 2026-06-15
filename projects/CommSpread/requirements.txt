@@ -1,0 +1,13 @@
+torch
+vmas
+benchmarl
+torchrl
+moviepy
+pyyaml
+
+# Optional rendering helpers for headless Linux/Colab.
+pyvirtualdisplay
+av<14
+
+# Optional GNN training dependencies.
+torch-geometric

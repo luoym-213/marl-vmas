@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comm-spread"
+version = "0.1.0"
+description = "VMAS simple_spread-style cooperative coverage task with BenchMARL helpers."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "vmas",
+    "benchmarl",
+    "torchrl",
+    "moviepy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+render = ["pyvirtualdisplay", "av<14"]
+gnn = ["torch-geometric", "torch-cluster"]
+
+[tool.setuptools.packages.find]
+include = ["comm_spread*"]
