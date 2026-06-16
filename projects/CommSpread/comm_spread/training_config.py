@@ -50,6 +50,58 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "success_reward": 20.0,
         "comms_rendering_range": 1.0,
     },
+    "sar_low": {
+        "scenario_type": "sar_low",
+        "max_steps": 100,
+        "n_agents": 3,
+        "n_targets": 3,
+        "belief_world_size": 2.0,
+        "belief_cell_size": 0.02,
+        "sensor_radius": 0.3,
+        "sensor_fidelity": 0.8,
+        "goal_radius": 0.1,
+        "goal_reward": 2.0,
+        "rescue_reward": 10.0,
+        "discovery_reward": 1.0,
+        "distance_reward_scale": 1.0,
+        "collision_penalty": -20.0,
+        "boundary_penalty": -5.0,
+        "time_penalty": 0.0,
+        "retire_on_rescue": True,
+        "auto_resample_goals": True,
+        "done_when_all_targets_visited": False,
+        "high_level_interval": 5,
+        "rrt_top_k": 5,
+        "rrt_max_iter": 40,
+        "enable_rrt_candidates": True,
+        "comms_rendering_range": 0.0,
+    },
+    "sar_high_fixed": {
+        "scenario_type": "sar_high_fixed",
+        "max_steps": 100,
+        "n_agents": 3,
+        "n_targets": 3,
+        "belief_world_size": 2.0,
+        "belief_cell_size": 0.02,
+        "sensor_radius": 0.3,
+        "sensor_fidelity": 0.8,
+        "goal_radius": 0.1,
+        "goal_reward": 2.0,
+        "rescue_reward": 10.0,
+        "discovery_reward": 1.0,
+        "distance_reward_scale": 1.0,
+        "collision_penalty": -20.0,
+        "boundary_penalty": -5.0,
+        "time_penalty": 0.2,
+        "retire_on_rescue": True,
+        "auto_resample_goals": False,
+        "done_when_all_targets_visited": True,
+        "high_level_interval": 5,
+        "rrt_top_k": 5,
+        "rrt_max_iter": 40,
+        "enable_rrt_candidates": True,
+        "comms_rendering_range": 1.0,
+    },
 }
 
 
@@ -102,6 +154,22 @@ def build_experiment_config(
 
     if max_n_frames is not None:
         config.max_n_frames = max_n_frames
+        if quick:
+            config.on_policy_collected_frames_per_batch = min(
+                config.on_policy_collected_frames_per_batch,
+                max_n_frames,
+                1_000,
+            )
+            config.on_policy_n_envs_per_worker = min(
+                config.on_policy_n_envs_per_worker,
+                max(1, min(4, max_n_frames // 100)),
+            )
+            config.on_policy_minibatch_size = min(
+                config.on_policy_minibatch_size,
+                1024,
+            )
+            config.evaluation_interval = min(config.evaluation_interval, max_n_frames)
+            config.evaluation_episodes = min(config.evaluation_episodes, 4)
 
     return config
 

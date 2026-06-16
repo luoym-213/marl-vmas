@@ -6,7 +6,8 @@ import argparse
 import time
 from pathlib import Path
 
-from comm_spread.env_factory import make_comm_spread_env
+from comm_spread.env_factory import make_comm_spread_env, make_sar_env
+from comm_spread.sar_scenario import SarScenario
 from comm_spread.scenario import CommSpreadScenario
 
 
@@ -16,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--scenario", choices=["spread", "sar"], default="spread")
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--output", default="outputs/random_rollout.gif")
     return parser.parse_args()
@@ -23,11 +25,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    env = make_comm_spread_env(
-        num_envs=args.num_envs,
-        device=args.device,
-        seed=args.seed,
-    )
+    make_env = make_sar_env if args.scenario == "sar" else make_comm_spread_env
+    env = make_env(num_envs=args.num_envs, device=args.device, seed=args.seed)
 
     frames = []
     start = time.time()
@@ -39,7 +38,7 @@ def main() -> None:
         print(f"step {step + 1}/{args.steps}")
 
     elapsed = time.time() - start
-    scenario_name = CommSpreadScenario.__name__
+    scenario_name = SarScenario.__name__ if args.scenario == "sar" else CommSpreadScenario.__name__
     print(
         f"{args.steps} steps of {args.num_envs} parallel envs took "
         f"{elapsed:.2f}s on {args.device} for {scenario_name}."

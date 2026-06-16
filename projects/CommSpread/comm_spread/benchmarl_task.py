@@ -16,6 +16,7 @@ from torchrl.envs import EnvBase
 from benchmarl.environments.common import Task
 from benchmarl.utils import DEVICE_TYPING
 
+from comm_spread.sar_scenario import SarScenario
 from comm_spread.scenario import CommSpreadScenario
 
 
@@ -23,6 +24,8 @@ class CommSpreadTask(Task):
     """Enum wrapper so BenchMARL can consume CommSpread."""
 
     SPREAD = None
+    SAR_LOW = None
+    SAR_HIGH_FIXED = None
 
     def get_env_fun(
         self,
@@ -32,9 +35,12 @@ class CommSpreadTask(Task):
         device: DEVICE_TYPING,
     ) -> Callable[[], EnvBase]:
         config = copy.deepcopy(self.config)
+        scenario_type = config.pop("scenario_type", "spread")
 
         return lambda: VmasEnv(
-            scenario=CommSpreadScenario(),
+            scenario=SarScenario()
+            if scenario_type in {"sar_low", "sar_high_fixed"}
+            else CommSpreadScenario(),
             num_envs=num_envs,
             continuous_actions=continuous_actions,
             seed=seed,
@@ -75,6 +81,8 @@ class CommSpreadTask(Task):
         return observation_spec
 
     def info_spec(self, env: EnvBase) -> Optional[Composite]:
+        if self.config.get("scenario_type") == "sar_low":
+            return None
         info_spec = _clone_unbatched_spec(env, "full_observation_spec")
         for group in self.group_map(env):
             if "observation" in info_spec[group]:

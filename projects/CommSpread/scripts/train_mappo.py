@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from benchmarl.experiment import Experiment
 
@@ -48,6 +49,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.variant == "sar_high_fixed":
+        raise SystemExit(
+            "sar_high_fixed uses comm_spread.macro_env.SarFixedIntervalMacroEnv "
+            "and needs a custom BenchMARL collector before train_mappo.py can train it."
+        )
+    Path(args.save_folder).mkdir(parents=True, exist_ok=True)
+
     task_config = dict(TASK_VARIANTS[args.variant])
 
     if args.model == "gnn":
@@ -57,7 +65,11 @@ def main() -> None:
     else:
         model_config, critic_model_config = build_mlp_configs()
 
-    task = CommSpreadTask.SPREAD.update_config(task_config)
+    task_member = {
+        "sar_low": CommSpreadTask.SAR_LOW,
+        "sar_high_fixed": CommSpreadTask.SAR_HIGH_FIXED,
+    }.get(args.variant, CommSpreadTask.SPREAD)
+    task = task_member.update_config(task_config)
     experiment = Experiment(
         task=task,
         algorithm_config=build_mappo_config(),
