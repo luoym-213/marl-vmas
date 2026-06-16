@@ -33,6 +33,12 @@ class SarScenario(BaseScenario):
     """
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
+        self.mode = kwargs.pop("mode", "debug")
+        self.emit_info = kwargs.pop("emit_info", self.mode != "low")
+        self.enable_high_level_state = kwargs.pop(
+            "enable_high_level_state",
+            self.mode != "low",
+        )
         self.n_agents = kwargs.pop("n_agents", 3)
         self.n_targets = kwargs.pop("n_targets", self.n_agents)
         self.max_steps = kwargs.pop("max_steps", 100)
@@ -68,7 +74,10 @@ class SarScenario(BaseScenario):
         self.rrt_top_k = kwargs.pop("rrt_top_k", 5)
         self.rrt_max_iter = kwargs.pop("rrt_max_iter", 40)
         self.rrt_seed = kwargs.pop("rrt_seed", 0)
-        self.enable_rrt_candidates = kwargs.pop("enable_rrt_candidates", True)
+        self.enable_rrt_candidates = kwargs.pop(
+            "enable_rrt_candidates",
+            self.mode != "low",
+        )
         self.comms_rendering_range = kwargs.pop("comms_rendering_range", 0.0)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
@@ -143,31 +152,26 @@ class SarScenario(BaseScenario):
         self.goal_done = torch.ones(batch_dim, self.n_agents, dtype=torch.bool, device=device)
         self.previous_goal_dist = torch.zeros(batch_dim, self.n_agents, device=device)
 
-        self.belief_map = torch.full(
-            (batch_dim, self.map_dim, self.map_dim),
+        self.belief_maps = torch.full(
+            (batch_dim, self.n_agents, self.map_dim, self.map_dim),
             self.initial_belief,
             dtype=torch.float32,
             device=device,
         )
-        self.entropy_map = self._compute_entropy(self.belief_map)
-        self.voronoi_masks = torch.zeros(
+        self.target_detected = torch.zeros(
             batch_dim,
             self.n_agents,
-            self.map_dim,
-            self.map_dim,
+            self.n_targets,
             dtype=torch.bool,
             device=device,
         )
-        self.agent_heatmap = torch.zeros(batch_dim, self.map_dim, self.map_dim, device=device)
-        self.landmark_heatmap = torch.zeros_like(self.agent_heatmap)
-        self.target_detected = torch.zeros(
+        self.target_visited = torch.zeros(
             batch_dim,
             self.n_targets,
             dtype=torch.bool,
             device=device,
         )
-        self.target_visited = torch.zeros_like(self.target_detected)
-        self.detected_targets = torch.zeros(batch_dim, self.n_targets, 4, device=device)
+        self.detected_targets = torch.zeros(batch_dim, self.n_agents, self.n_targets, 4, device=device)
         self.explore_candidates = torch.zeros(
             batch_dim,
             self.n_agents,
@@ -198,7 +202,7 @@ class SarScenario(BaseScenario):
         self.target_visited[batch_slice] = False
         self.success[batch_slice] = False
         self.world_steps[batch_slice] = 0
-        self.belief_map[batch_slice] = self.initial_belief
+        self.belief_maps[batch_slice] = self.initial_belief
 
         self._refresh_maps(env_index)
         if env_index is None:
@@ -208,7 +212,8 @@ class SarScenario(BaseScenario):
             mask[env_index] = True
             self._sample_goals(mask)
         self.previous_goal_dist[batch_slice] = self._goal_distances()[batch_slice]
-        self._refresh_high_level_state(env_index)
+        if self.enable_high_level_state:
+            self._refresh_high_level_state(env_index)
 
     def process_action(self, agent: Agent) -> None:
         if not hasattr(agent.action, "u") or agent.action.u is None:
@@ -235,6 +240,8 @@ class SarScenario(BaseScenario):
 
         goal = self.assigned_goals[:, index]
         obs = torch.cat([agent.state.vel, goal - agent.state.pos, other_rel], dim=-1)
+        if self.mode == "low":
+            return {"obs": obs}
         return {
             "obs": obs,
             "pos": agent.state.pos,
@@ -251,13 +258,23 @@ class SarScenario(BaseScenario):
         return timeout
 
     def info(self, agent: Agent) -> Dict[str, Tensor]:
+        if not self.emit_info:
+            return {}
+
+        index = agent.sar_index
+        entropy_maps = self._compute_entropy(self.belief_maps)
+        agent_heatmap = self._agent_heatmaps()
+        landmark_heatmap = self._target_heatmaps()
+        voronoi_masks = self._compute_voronoi_masks(
+            torch.stack([a.state.pos for a in self.world.agents], dim=1)
+        )
         return {
-            "belief_map": self.belief_map,
-            "entropy_map": self.entropy_map,
-            "voronoi_masks": self.voronoi_masks.float(),
-            "heatmap": self.agent_heatmap,
-            "landmark_heatmap": self.landmark_heatmap,
-            "detected_targets": self.detected_targets,
+            "belief_map": self.belief_maps[:, index],
+            "entropy_map": entropy_maps[:, index],
+            "voronoi_masks": voronoi_masks[:, index].float(),
+            "heatmap": agent_heatmap[:, index],
+            "landmark_heatmap": landmark_heatmap[:, index],
+            "detected_targets": self.detected_targets[:, index],
             "visited_targets": self.target_visited.float(),
             "retired_agents": (~self.active_agents).float(),
             "success": self.success.float(),
@@ -396,7 +413,7 @@ class SarScenario(BaseScenario):
                     eligible
                     & matched
                     & (matched_dist < self.goal_radius)
-                    & self.target_detected[:, target_index]
+                    & self.target_detected[:, agent_index, target_index]
                     & ~self.target_visited[:, target_index]
                 )
                 if new_visit.any():
@@ -408,7 +425,7 @@ class SarScenario(BaseScenario):
         return rewards
 
     def _update_beliefs_and_discoveries(self) -> Tensor:
-        before_entropy = self.entropy_map.sum(dim=(-1, -2))
+        before_entropy = self._compute_entropy(self.belief_maps).sum(dim=(-1, -2))
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
         for agent_index in range(self.n_agents):
             pos = agent_pos[:, agent_index]
@@ -416,41 +433,44 @@ class SarScenario(BaseScenario):
             dy = self.cell_world_y.unsqueeze(0) - pos[:, 1].view(-1, 1, 1)
             in_fov = (dx.square() + dy.square()) <= self.sensor_radius**2
             in_fov = in_fov & self.active_agents[:, agent_index].view(-1, 1, 1)
-            updated = self._bayes_positive_update(self.belief_map)
-            self.belief_map = torch.where(in_fov, updated, self.belief_map)
+            updated = self._bayes_positive_update(self.belief_maps[:, agent_index])
+            self.belief_maps[:, agent_index] = torch.where(
+                in_fov,
+                updated,
+                self.belief_maps[:, agent_index],
+            )
 
-        self.entropy_map = self._compute_entropy(self.belief_map)
-        after_entropy = self.entropy_map.sum(dim=(-1, -2))
+        after_entropy = self._compute_entropy(self.belief_maps).sum(dim=(-1, -2))
         entropy_gain = (before_entropy - after_entropy).clamp(min=0.0)
 
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
         agent_target_dist = torch.cdist(agent_pos, target_pos)
         active_mask = self.active_agents.unsqueeze(-1)
-        newly_detected = ((agent_target_dist <= self.sensor_radius) & active_mask).any(dim=1)
+        newly_detected = (agent_target_dist <= self.sensor_radius) & active_mask
         newly_detected = newly_detected & ~self.target_detected
         self.target_detected |= newly_detected
 
         discover_counts = newly_detected.float().sum(dim=-1)
-        per_agent_discovery = (
-            self.discovery_reward
-            * discover_counts.unsqueeze(-1)
-            / max(float(self.n_agents), 1.0)
-        ).expand(-1, self.n_agents)
-        return per_agent_discovery + entropy_gain.unsqueeze(-1) / max(float(self.map_dim**2), 1.0)
+        per_agent_discovery = self.discovery_reward * discover_counts
+        return per_agent_discovery + entropy_gain / max(float(self.map_dim**2), 1.0)
 
     def _refresh_maps(self, env_index: int | None = None) -> None:
-        self.entropy_map = self._compute_entropy(self.belief_map)
-        self._refresh_high_level_state(env_index)
+        if self.enable_high_level_state:
+            self._refresh_high_level_state(env_index)
 
     def _refresh_high_level_state(self, env_index: int | None = None) -> None:
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
-        self.voronoi_masks = self._compute_voronoi_masks(agent_pos)
-        self.agent_heatmap = self._heatmap(agent_pos, self.sensor_radius * 0.2)
-        self.landmark_heatmap = self._heatmap(target_pos, self.target_radius)
+        voronoi_masks = self._compute_voronoi_masks(agent_pos)
+        target_pos_per_agent = target_pos.unsqueeze(1).expand(
+            -1,
+            self.n_agents,
+            -1,
+            -1,
+        )
         self.detected_targets = torch.cat(
             [
-                target_pos,
+                target_pos_per_agent,
                 self._target_utility().unsqueeze(-1),
                 self._target_claimed().unsqueeze(-1),
             ],
@@ -462,7 +482,12 @@ class SarScenario(BaseScenario):
             torch.zeros_like(self.detected_targets),
         )
         if self.enable_rrt_candidates:
-            self.explore_candidates = self._compute_rrt_candidates(agent_pos)
+            entropy_maps = self._compute_entropy(self.belief_maps)
+            self.explore_candidates = self._compute_rrt_candidates(
+                agent_pos,
+                voronoi_masks,
+                entropy_maps,
+            )
 
     def _compute_voronoi_masks(self, agent_pos: Tensor) -> Tensor:
         dx = self.cell_world_x.view(1, 1, self.map_dim, self.map_dim) - agent_pos[..., 0].view(
@@ -499,12 +524,45 @@ class SarScenario(BaseScenario):
             heat = torch.exp(-dist_sq / (2 * sigma**2))
             heat = torch.where(dist_sq <= radius**2, heat, torch.zeros_like(heat))
             maps.append(heat)
-        return torch.stack(maps, dim=0).max(dim=0).values if maps else torch.zeros_like(self.belief_map)
+        return torch.stack(maps, dim=0).max(dim=0).values if maps else torch.zeros_like(self.belief_maps[:, 0])
+
+    def _agent_heatmaps(self) -> Tensor:
+        agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
+        heatmaps = []
+        sigma = max((self.sensor_radius * 0.2) / 2.0, self.cell_size)
+        for agent_index in range(self.n_agents):
+            pos = agent_pos[:, agent_index]
+            dx = self.cell_world_x.unsqueeze(0) - pos[:, 0].view(-1, 1, 1)
+            dy = self.cell_world_y.unsqueeze(0) - pos[:, 1].view(-1, 1, 1)
+            dist_sq = dx.square() + dy.square()
+            heat = torch.exp(-dist_sq / (2 * sigma**2))
+            heat = torch.where(
+                dist_sq <= (self.sensor_radius * 0.2) ** 2,
+                heat,
+                torch.zeros_like(heat),
+            )
+            heatmaps.append(heat)
+        return torch.stack(heatmaps, dim=1)
+
+    def _target_heatmaps(self) -> Tensor:
+        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        sigma = max(self.target_radius / 2.0, self.cell_size)
+        heatmaps = torch.zeros_like(self.belief_maps)
+        for target_index in range(self.n_targets):
+            pos = target_pos[:, target_index]
+            dx = self.cell_world_x.unsqueeze(0) - pos[:, 0].view(-1, 1, 1)
+            dy = self.cell_world_y.unsqueeze(0) - pos[:, 1].view(-1, 1, 1)
+            dist_sq = dx.square() + dy.square()
+            heat = torch.exp(-dist_sq / (2 * sigma**2))
+            heat = torch.where(dist_sq <= self.target_radius**2, heat, torch.zeros_like(heat))
+            visible = self.target_detected[:, :, target_index].unsqueeze(-1).unsqueeze(-1)
+            heatmaps = torch.maximum(heatmaps, heat.unsqueeze(1) * visible.float())
+        return heatmaps
 
     def _target_utility(self) -> Tensor:
-        retired = (~self.active_agents).float().sum(dim=-1, keepdim=True)
+        retired = (~self.active_agents).float().sum(dim=-1).view(-1, 1, 1)
         return torch.where(
-            self.target_detected & ~self.target_visited,
+            self.target_detected & ~self.target_visited.unsqueeze(1),
             retired + 2.0,
             torch.zeros_like(self.target_detected, dtype=torch.float32),
         )
@@ -514,9 +572,14 @@ class SarScenario(BaseScenario):
         collect_goals = self.assigned_tasks[..., 0] > 0.5
         dists = torch.cdist(self.assigned_goals, target_pos)
         claimed = ((dists <= self.goal_radius) & collect_goals.unsqueeze(-1)).any(dim=1)
-        return claimed.float()
+        return claimed.unsqueeze(1).expand(-1, self.n_agents, -1).float()
 
-    def _compute_rrt_candidates(self, agent_pos: Tensor) -> Tensor:
+    def _compute_rrt_candidates(
+        self,
+        agent_pos: Tensor,
+        voronoi_masks: Tensor,
+        entropy_maps: Tensor,
+    ) -> Tensor:
         cfg = RRTConfig(
             top_k=self.rrt_top_k,
             max_iterations=self.rrt_max_iter,
@@ -525,8 +588,8 @@ class SarScenario(BaseScenario):
         candidates = plan_batch(
             agent_pos.detach().cpu().numpy(),
             self.assigned_goals.detach().cpu().numpy(),
-            self.voronoi_masks.detach().cpu().numpy(),
-            self.entropy_map.detach().cpu().numpy(),
+            voronoi_masks.detach().cpu().numpy(),
+            entropy_maps.detach().cpu().numpy(),
             config=cfg,
             seed=self.rrt_seed,
         )

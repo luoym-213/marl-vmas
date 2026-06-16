@@ -56,18 +56,16 @@ class SarFixedIntervalMacroEnv:
         )
         teammate_nodes = torch.cat([agent_pos, agent_vel, dist_to_goal], dim=-1)
 
-        target_pos = scenario.detected_targets[:, None, :, 0:2] - agent_pos[:, :, None, :]
-        target_meta = scenario.detected_targets[:, None, :, 2:4].expand(
-            -1,
-            scenario.n_agents,
-            -1,
-            -1,
-        )
+        target_pos = scenario.detected_targets[:, :, :, 0:2] - agent_pos[:, :, None, :]
+        target_meta = scenario.detected_targets[:, :, :, 2:4]
         target_nodes = torch.cat([target_pos, target_meta], dim=-1)
         target_mask = (
-            scenario.target_detected[:, None, :]
+            scenario.target_detected
             & ~scenario.target_visited[:, None, :]
-        ).expand(-1, scenario.n_agents, -1)
+        )
+
+        entropy_maps = scenario._compute_entropy(scenario.belief_maps)
+        target_heatmaps = scenario._target_heatmaps()
 
         return {
             "ego_nodes": ego_nodes,
@@ -77,11 +75,11 @@ class SarFixedIntervalMacroEnv:
             "target_mask": target_mask,
             "maps": torch.stack(
                 [
-                    scenario.entropy_map,
-                    scenario.agent_heatmap,
-                    scenario.landmark_heatmap,
+                    entropy_maps,
+                    scenario.belief_maps,
+                    target_heatmaps,
                 ],
-                dim=1,
+                dim=2,
             ),
             "active_mask": scenario.active_agents,
         }

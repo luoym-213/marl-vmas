@@ -62,6 +62,7 @@ python3 scripts/inspect_env.py --scenario sar --num-envs 8 --device cpu
 python3 scripts/random_rollout.py --steps 100 --render --output outputs/random_rollout.gif
 python3 scripts/random_rollout.py --scenario sar --steps 100
 python3 scripts/inspect_macro_env.py --num-envs 4 --device cpu
+python3 scripts/inspect_async_smdp.py --num-envs 2 --steps 30 --device cpu
 python3 scripts/train_mappo.py --variant spread --model mlp
 python3 scripts/train_mappo.py --variant spread_early_done --model mlp 
 python3 scripts/train_mappo.py --variant sar_low --model mlp
@@ -77,7 +78,8 @@ python3 scripts/train_mappo.py --variant spread_gnn --model gnn --comms-radius 1
 
 `sar_low` is the first trainable BenchMARL target. It uses continuous VMAS
 actions, random goal assignment, distance-difference reward, collision/boundary
-penalties, and the SAR info channels needed by the high-level policy.
+penalties, and a low-memory observation surface. In this mode raw maps and
+high-level info are kept out of the TorchRL collector buffer.
 
 `sar_high_fixed` provides the SAR scenario configuration for fixed-interval
 high-level experiments. The high-level macro-action loop lives in
@@ -85,6 +87,11 @@ high-level experiments. The high-level macro-action loop lives in
 to exploration/target goals and executes several low-level VMAS steps. It is a
 debuggable wrapper for the next custom BenchMARL collector stage, not a full
 replacement for BenchMARL's default on-policy collector.
+
+`comm_spread.async_smdp.AsyncSMDPCollector` is the first asynchronous high-level
+collector scaffold. It creates per-agent high-level transitions only when that
+agent reaches a goal or terminates, and stores the agent's local map channels
+only at decision points.
 
 ## Full training
 

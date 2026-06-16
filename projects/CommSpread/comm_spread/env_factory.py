@@ -25,6 +25,9 @@ DEFAULT_SCENARIO_CONFIG: dict[str, Any] = {
 }
 
 DEFAULT_SAR_CONFIG: dict[str, Any] = {
+    "mode": "debug",
+    "emit_info": True,
+    "enable_high_level_state": True,
     "n_agents": 3,
     "n_targets": 3,
     "max_steps": 100,

@@ -81,8 +81,11 @@ def plan_batch(
     out = np.zeros((batch_dim, n_agents, cfg.top_k, 4), dtype=np.float32)
 
     for batch_index in range(batch_dim):
-        entropy_map = entropy_maps[batch_index]
         for agent_index in range(n_agents):
+            if entropy_maps.ndim == 4:
+                entropy_map = entropy_maps[batch_index, agent_index]
+            else:
+                entropy_map = entropy_maps[batch_index]
             start_grid = world_to_grid(
                 agent_positions[batch_index, agent_index],
                 map_dim=map_dim,
