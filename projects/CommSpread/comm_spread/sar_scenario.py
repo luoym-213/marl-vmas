@@ -51,7 +51,7 @@ class SarScenario(BaseScenario):
 
         self.agent_radius = kwargs.pop("agent_radius", 0.05)
         self.target_radius = kwargs.pop("target_radius", 0.05)
-        self.goal_radius = kwargs.pop("goal_radius", 0.1)
+        self.goal_radius = kwargs.pop("goal_radius", self.target_radius)
         self.sensor_radius = kwargs.pop("sensor_radius", 0.3)
         self.sensor_fidelity = kwargs.pop("sensor_fidelity", 0.8)
         self.initial_belief = kwargs.pop("initial_belief", 0.5)
@@ -61,6 +61,7 @@ class SarScenario(BaseScenario):
         self.discovery_reward = kwargs.pop("discovery_reward", 1.0)
         self.distance_reward_scale = kwargs.pop("distance_reward_scale", 1.0)
         self.collision_penalty = kwargs.pop("collision_penalty", -20.0)
+        self.collision_distance = kwargs.pop("collision_distance", 0.0)
         self.boundary_penalty = kwargs.pop("boundary_penalty", -5.0)
         self.time_penalty = kwargs.pop("time_penalty", 0.0)
         self.retire_on_rescue = kwargs.pop("retire_on_rescue", True)
@@ -378,7 +379,7 @@ class SarScenario(BaseScenario):
                 if i >= j:
                     continue
                 dist = self.world.get_distance(agent, other)
-                collision = dist <= (self.agent_radius * 2)
+                collision = dist <= self.collision_distance
                 active_pair = self.active_agents[:, i] & self.active_agents[:, j]
                 penalty_mask = collision & active_pair
                 penalties[:, i] += self.collision_penalty * penalty_mask.float()
