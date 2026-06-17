@@ -62,6 +62,11 @@ class SarScenario(BaseScenario):
         self.distance_reward_scale = kwargs.pop("distance_reward_scale", 1.0)
         self.collision_penalty = kwargs.pop("collision_penalty", -20.0)
         self.collision_distance = kwargs.pop("collision_distance", 0.0)
+        self.collision_safe_distance = kwargs.pop("collision_safe_distance", 0.0)
+        self.max_collision_penalty = kwargs.pop(
+            "max_collision_penalty",
+            self.collision_penalty,
+        )
         self.boundary_penalty = kwargs.pop("boundary_penalty", -5.0)
         self.time_penalty = kwargs.pop("time_penalty", 0.0)
         self.retire_on_rescue = kwargs.pop("retire_on_rescue", True)
@@ -379,11 +384,23 @@ class SarScenario(BaseScenario):
                 if i >= j:
                     continue
                 dist = self.world.get_distance(agent, other)
-                collision = dist <= self.collision_distance
                 active_pair = self.active_agents[:, i] & self.active_agents[:, j]
-                penalty_mask = collision & active_pair
-                penalties[:, i] += self.collision_penalty * penalty_mask.float()
-                penalties[:, j] += self.collision_penalty * penalty_mask.float()
+                if self.collision_safe_distance > 0:
+                    violation = (
+                        1.0 - dist / self.collision_safe_distance
+                    ).clamp(min=0.0)
+                    pair_penalty = self.collision_penalty * violation.square()
+                    pair_penalty = pair_penalty.clamp(min=self.max_collision_penalty)
+                    pair_penalty = torch.where(
+                        active_pair,
+                        pair_penalty,
+                        torch.zeros_like(pair_penalty),
+                    )
+                else:
+                    collision = dist <= self.collision_distance
+                    pair_penalty = self.collision_penalty * (collision & active_pair).float()
+                penalties[:, i] += pair_penalty
+                penalties[:, j] += pair_penalty
         return penalties
 
     def _boundary_penalties(self) -> Tensor:
