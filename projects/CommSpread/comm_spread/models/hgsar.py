@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 
@@ -43,7 +45,7 @@ class LowLevelGoalConditionedActorCritic(nn.Module):
 
 
 class HeterogeneousGraphActor(nn.Module):
-    """High-level node selector over exploration and detected-target nodes."""
+    """High-level node selector matching the original HGSAR graph policy path."""
 
     def __init__(
         self,
@@ -51,6 +53,7 @@ class HeterogeneousGraphActor(nn.Module):
         teammate_features: int = 5,
         explore_features: int = 4,
         target_features: int = 4,
+        edge_features: int = 3,
         hidden_dim: int = 128,
         node_dim: int = 64,
     ) -> None:
@@ -59,17 +62,19 @@ class HeterogeneousGraphActor(nn.Module):
         self.teammate_encoder = _mlp(teammate_features, node_dim)
         self.explore_encoder = _mlp(explore_features, node_dim)
         self.target_encoder = _mlp(target_features, node_dim)
-
-        self.q_proj = nn.Linear(node_dim, node_dim)
-        self.k_proj = nn.Linear(node_dim * 2, node_dim)
-        self.v_proj = nn.Linear(node_dim * 2, node_dim)
-        self.context = nn.Sequential(
-            nn.Linear(node_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, node_dim),
+        self.explore_node_linear = nn.Linear(node_dim, node_dim)
+        self.target_node_linear = nn.Linear(node_dim, node_dim)
+        self.linear_ln = nn.LayerNorm(node_dim)
+        self.edge_encoder = nn.Sequential(
+            nn.Linear(edge_features, 32),
             nn.ReLU(),
         )
+
+        self.q_proj = nn.Linear(node_dim, node_dim)
+        self.k_proj = nn.Linear(node_dim + 32, node_dim)
+        self.v_proj = nn.Linear(node_dim + 32, node_dim)
         self.node_selection_head = nn.Linear(node_dim, 1)
+        self.attn_dim = node_dim
         self.apply(_init_weights)
 
     def forward(
@@ -81,6 +86,9 @@ class HeterogeneousGraphActor(nn.Module):
         *,
         teammate_mask: Tensor | None = None,
         target_mask: Tensor | None = None,
+        explore_edges: Tensor | None = None,
+        target_edges: Tensor | None = None,
+        action_mask: Tensor | None = None,
     ) -> Tensor:
         """Return logits for concatenated [explore_nodes, target_nodes].
 
@@ -90,42 +98,159 @@ class HeterogeneousGraphActor(nn.Module):
             explore_nodes: [B, K, 4]
             target_nodes: [B, L, 4]
             target_mask: [B, L] or [B, L, 1], true for valid nodes.
+            explore_edges: [B, K, 3]
+            target_edges: [B, L, 3]
+            action_mask: [B, K + L], true for selectable nodes.
         """
 
-        ego = self.ego_encoder(ego_nodes)
-        teammates = self.teammate_encoder(teammate_nodes)
-        if teammate_mask is not None:
-            mask = _squeeze_mask(teammate_mask).unsqueeze(-1)
-            denom = mask.sum(dim=1).clamp_min(1.0)
-            teammate_context = (teammates * mask).sum(dim=1) / denom
-        else:
-            teammate_context = teammates.mean(dim=1)
+        batch_size = ego_nodes.shape[0]
+        n_explore = explore_nodes.shape[1]
+        n_target = target_nodes.shape[1]
 
-        global_context = self.context(torch.cat([ego, teammate_context], dim=-1))
-
-        explore = self.explore_encoder(explore_nodes)
-        target = self.target_encoder(target_nodes)
-        nodes = torch.cat([explore, target], dim=1)
-        context = global_context.unsqueeze(1).expand(-1, nodes.size(1), -1)
-
-        query = self.q_proj(ego).unsqueeze(1)
-        keys = self.k_proj(torch.cat([nodes, context], dim=-1))
-        values = self.v_proj(torch.cat([nodes, context], dim=-1))
-        attn = torch.softmax((query * keys).sum(dim=-1, keepdim=True) / keys.size(-1) ** 0.5, dim=1)
-        fused = values * attn + nodes
-        logits = self.node_selection_head(fused).squeeze(-1)
-
-        if target_mask is not None:
-            target_valid = _squeeze_mask(target_mask).bool()
-            explore_valid = torch.ones(
-                logits.shape[0],
-                explore_nodes.shape[1],
+        if explore_edges is None:
+            explore_edges = _relative_edges(explore_nodes[..., 0:2])
+        if target_edges is None:
+            target_edges = _relative_edges(target_nodes[..., 0:2])
+        if target_mask is None:
+            target_valid = torch.ones(
+                batch_size,
+                n_target,
                 dtype=torch.bool,
-                device=logits.device,
+                device=ego_nodes.device,
             )
-            valid = torch.cat([explore_valid, target_valid], dim=1)
-            logits = logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
-        return logits
+        else:
+            target_valid = _squeeze_mask(target_mask).bool()
+        if teammate_mask is None:
+            teammate_mask = torch.ones(
+                batch_size,
+                teammate_nodes.shape[1],
+                1,
+                dtype=teammate_nodes.dtype,
+                device=teammate_nodes.device,
+            )
+
+        ego_feats = self.ego_encoder(ego_nodes)
+
+        explore_feats = self.explore_encoder(
+            explore_nodes.reshape(batch_size * n_explore, -1)
+        ).view(batch_size, n_explore, -1)
+        explore_feats = self.explore_node_linear(
+            explore_feats.reshape(batch_size * n_explore, -1)
+        ).view(batch_size, n_explore, -1)
+        explore_feats = self.linear_ln(explore_feats)
+
+        target_feats = self.target_encoder(
+            target_nodes.reshape(batch_size * n_target, -1)
+        ).view(batch_size, n_target, -1)
+        target_feats = self.target_team_gat(
+            ego_nodes[:, :2],
+            teammate_nodes,
+            teammate_mask,
+            target_nodes,
+            target_valid.unsqueeze(-1).float(),
+            target_feats,
+        )
+        target_feats = self.target_node_linear(
+            target_feats.reshape(batch_size * n_target, -1)
+        ).view(batch_size, n_target, -1)
+        target_feats = self.linear_ln(target_feats)
+
+        explore_edge_feats = self.edge_encoder(
+            explore_edges.reshape(batch_size * n_explore, -1)
+        ).view(batch_size, n_explore, -1)
+        target_edge_feats = self.edge_encoder(
+            target_edges.reshape(batch_size * n_target, -1)
+        ).view(batch_size, n_target, -1)
+
+        explore_kv = torch.cat([explore_feats, explore_edge_feats], dim=-1)
+        target_kv = torch.cat([target_feats, target_edge_feats], dim=-1)
+        unified_kv = torch.cat([explore_kv, target_kv], dim=1)
+        unified_k = self.k_proj(unified_kv)
+        unified_v = self.v_proj(unified_kv)
+
+        explore_valid = torch.ones(
+            batch_size,
+            n_explore,
+            dtype=torch.bool,
+            device=ego_nodes.device,
+        )
+        valid = torch.cat([explore_valid, target_valid], dim=1)
+        all_targets_valid = target_valid.numel() > 0 and target_valid.all(dim=1)
+        if isinstance(all_targets_valid, Tensor):
+            valid[all_targets_valid, :n_explore] = False
+        if action_mask is not None:
+            valid = valid & _squeeze_mask(action_mask).bool()
+        no_valid = ~valid.any(dim=1)
+        if no_valid.any():
+            valid[no_valid, :n_explore] = True
+
+        query = self.q_proj(ego_feats).unsqueeze(1)
+        attn_scores = torch.matmul(query, unified_k.transpose(1, 2)) / math.sqrt(self.attn_dim)
+        attn_scores = attn_scores.masked_fill(~valid.unsqueeze(1), torch.finfo(attn_scores.dtype).min)
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        context = torch.matmul(attn_weights, unified_v).squeeze(1)
+        logits = self.node_selection_head(unified_v + context.unsqueeze(1)).squeeze(-1)
+        return logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
+
+    def target_team_gat(
+        self,
+        ego_pos: Tensor,
+        teammate_nodes: Tensor,
+        teammate_mask: Tensor,
+        target_nodes: Tensor,
+        target_mask: Tensor,
+        target_node_feats: Tensor,
+    ) -> Tensor:
+        batch_size, n_targets, _ = target_nodes.shape
+        n_teammates = teammate_nodes.shape[1]
+
+        target_abs_pos = ego_pos.unsqueeze(1) + target_nodes[..., 0:2]
+        teammate_abs_pos = teammate_nodes[..., 0:2]
+        teammate_rel_to_target = teammate_abs_pos.unsqueeze(1) - target_abs_pos.unsqueeze(2)
+        teammate_other_feats = teammate_nodes[..., 2:].unsqueeze(1).expand(
+            batch_size,
+            n_targets,
+            n_teammates,
+            -1,
+        )
+        teammate_nodes_per_target = torch.cat(
+            [teammate_rel_to_target, teammate_other_feats],
+            dim=-1,
+        )
+        teammate_feats = self.teammate_encoder(
+            teammate_nodes_per_target.reshape(batch_size * n_targets * n_teammates, -1)
+        ).view(batch_size, n_targets, n_teammates, -1)
+
+        target_query = target_node_feats.unsqueeze(2)
+        attn_scores = torch.matmul(
+            target_query,
+            teammate_feats.transpose(-2, -1),
+        ) / math.sqrt(self.attn_dim)
+        teammate_mask_expanded = _squeeze_mask(teammate_mask).view(
+            batch_size,
+            1,
+            1,
+            n_teammates,
+        )
+        target_mask_expanded = _squeeze_mask(target_mask).view(
+            batch_size,
+            n_targets,
+            1,
+            1,
+        )
+        attn_scores = attn_scores.masked_fill(
+            teammate_mask_expanded < 0.5,
+            torch.finfo(attn_scores.dtype).min,
+        )
+        attn_scores = attn_scores.masked_fill(
+            target_mask_expanded < 0.5,
+            torch.finfo(attn_scores.dtype).min,
+        )
+        attn_weights = torch.softmax(attn_scores, dim=-1) * teammate_mask_expanded
+        target_aggregated = torch.matmul(attn_weights, teammate_feats).squeeze(2)
+        has_teammate = (teammate_mask_expanded.sum(dim=-1) > 0).float()
+        target_aggregated = target_aggregated * has_teammate * target_mask_expanded.squeeze(-1)
+        return target_node_feats + target_aggregated
 
 
 class HighLevelMapCritic(nn.Module):
@@ -163,6 +288,8 @@ class HighLevelMapCritic(nn.Module):
     def forward(self, maps: Tensor, agent_nodes: Tensor) -> Tensor:
         map_features = self.map_backbone(maps)
         agent_features = self.agent_encoder(agent_nodes)
+        if agent_nodes.ndim == 2:
+            return self.value(torch.cat([map_features, agent_features], dim=-1))
         map_features = map_features.unsqueeze(1).expand(-1, self.n_agents, -1)
         return self.value(torch.cat([map_features, agent_features], dim=-1)).squeeze(-1)
 
@@ -180,3 +307,11 @@ def _squeeze_mask(mask: Tensor) -> Tensor:
     if mask.ndim == 3 and mask.shape[-1] == 1:
         return mask.squeeze(-1).float()
     return mask.float()
+
+
+def _relative_edges(relative_xy: Tensor) -> Tensor:
+    distance = torch.linalg.vector_norm(relative_xy, dim=-1, keepdim=True)
+    safe_distance = distance.clamp_min(1e-6)
+    cos_theta = relative_xy[..., 0:1] / safe_distance
+    sin_theta = relative_xy[..., 1:2] / safe_distance
+    return torch.cat([distance, cos_theta, sin_theta], dim=-1)

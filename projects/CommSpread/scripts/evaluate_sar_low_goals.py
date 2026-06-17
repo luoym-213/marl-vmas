@@ -125,46 +125,6 @@ def _stack_agent_pos(scenario: Any) -> torch.Tensor:
     return torch.stack([agent.state.pos for agent in scenario.world.agents], dim=1)
 
 
-def _color_tuple(color: Any, env_index: int) -> tuple[float, float, float, float]:
-    if hasattr(color, "value"):
-        color = color.value
-    if isinstance(color, torch.Tensor):
-        if color.ndim > 1:
-            color = color[env_index]
-        color = color.detach().cpu().tolist()
-    values = list(color)
-    if len(values) < 3:
-        return (0.0, 0.0, 0.0, 0.9)
-    alpha = values[3] if len(values) > 3 else 0.9
-    return (float(values[0]), float(values[1]), float(values[2]), float(alpha))
-
-
-def install_goal_marker_render(scenario: Any) -> None:
-    """Install a script-local extra_render wrapper that draws assigned goals."""
-
-    if getattr(scenario, "_sar_goal_marker_render_installed", False):
-        return
-
-    original_extra_render = scenario.extra_render
-
-    def extra_render_with_goals(env_index: int = 0):
-        from vmas.simulator import rendering
-
-        geoms = list(original_extra_render(env_index))
-        for agent_index, agent in enumerate(scenario.world.agents):
-            goal = scenario.assigned_goals[env_index, agent_index].detach().cpu()
-            circle = rendering.make_circle(float(scenario.goal_radius), filled=False)
-            xform = rendering.Transform()
-            circle.add_attr(xform)
-            xform.set_translation(float(goal[0]), float(goal[1]))
-            circle.set_color(*_color_tuple(agent.color, env_index))
-            geoms.append(circle)
-        return geoms
-
-    scenario.extra_render = extra_render_with_goals
-    scenario._sar_goal_marker_render_installed = True
-
-
 def save_gif(frames: list[Any], output: Path, fps: int) -> None:
     if not frames:
         return
@@ -202,7 +162,6 @@ def run_policy_eval(
             raise ValueError(
                 f"--render-env-index must be in [0, {num_envs - 1}], got {render_env_index}"
             )
-        install_goal_marker_render(scenario)
 
     td = env.reset()
     if render_enabled:

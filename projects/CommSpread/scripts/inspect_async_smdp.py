@@ -39,9 +39,13 @@ def main() -> None:
         print(f"first env_id={first.env_id} agent_id={first.agent_id}")
         print(f"ego_node shape={tuple(first.ego_node.shape)}")
         print(f"teammate_nodes shape={tuple(first.teammate_nodes.shape)}")
+        print(f"teammate_mask shape={tuple(first.teammate_mask.shape)}")
         print(f"explore_nodes shape={tuple(first.explore_nodes.shape)}")
+        print(f"explore_edges shape={tuple(first.explore_edges.shape)}")
         print(f"target_nodes shape={tuple(first.target_nodes.shape)}")
+        print(f"target_edges shape={tuple(first.target_edges.shape)}")
         print(f"target_mask shape={tuple(first.target_mask.shape)}")
+        print(f"action_mask shape={tuple(first.action_mask.shape)}")
         print(f"map_channels shape={tuple(first.map_channels.shape)}")
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import typing
 from typing import Dict, List
 
+import numpy as np
 import torch
 from torch import Tensor
 from vmas.simulator.core import Agent, Landmark, Sphere, World
@@ -85,6 +86,22 @@ class SarScenario(BaseScenario):
             self.mode != "low",
         )
         self.comms_rendering_range = kwargs.pop("comms_rendering_range", 0.0)
+        self.render_sensor_range = kwargs.pop("render_sensor_range", True)
+        self.render_assigned_goals = kwargs.pop("render_assigned_goals", True)
+        self.render_entropy_map = kwargs.pop("render_entropy_map", True)
+        self.render_entropy_grid = kwargs.pop("render_entropy_grid", True)
+        self.render_recent_rrt_candidates = kwargs.pop(
+            "render_recent_rrt_candidates",
+            True,
+        )
+        self.sensor_range_alpha = kwargs.pop("sensor_range_alpha", 0.12)
+        self.goal_marker_alpha = kwargs.pop("goal_marker_alpha", 0.9)
+        self.goal_marker_radius = kwargs.pop("goal_marker_radius", None)
+        self.entropy_map_alpha = kwargs.pop("entropy_map_alpha", 0.55)
+        self.entropy_grid_alpha = kwargs.pop("entropy_grid_alpha", 0.12)
+        self.rrt_candidate_alpha = kwargs.pop("rrt_candidate_alpha", 0.95)
+        self.rrt_candidate_radius = kwargs.pop("rrt_candidate_radius", None)
+        self.recent_decision_render_steps = kwargs.pop("recent_decision_render_steps", 5)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -185,6 +202,19 @@ class SarScenario(BaseScenario):
             4,
             device=device,
         )
+        self.recent_decision_ttl = torch.zeros(
+            batch_dim,
+            self.n_agents,
+            dtype=torch.long,
+            device=device,
+        )
+        self.recent_rrt_candidate_world = torch.zeros(
+            batch_dim,
+            self.n_agents,
+            self.rrt_top_k,
+            2,
+            device=device,
+        )
         self.agent_rewards = torch.zeros(batch_dim, self.n_agents, device=device)
         self.high_rewards = torch.zeros_like(self.agent_rewards)
         self.success = torch.zeros(batch_dim, dtype=torch.bool, device=device)
@@ -206,6 +236,8 @@ class SarScenario(BaseScenario):
         self.assigned_tasks[batch_slice] = 0.0
         self.target_detected[batch_slice] = False
         self.target_visited[batch_slice] = False
+        self.recent_decision_ttl[batch_slice] = 0
+        self.recent_rrt_candidate_world[batch_slice] = 0.0
         self.success[batch_slice] = False
         self.world_steps[batch_slice] = 0
         self.belief_maps[batch_slice] = self.initial_belief
@@ -294,9 +326,71 @@ class SarScenario(BaseScenario):
 
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
         geoms: List[Geom] = []
+        from vmas.simulator import rendering
+
+        if self.render_entropy_map:
+            geoms.append(self._make_entropy_render_image(env_index, rendering))
+
+        if self.render_entropy_grid:
+            geoms.extend(self._make_entropy_grid_lines(rendering))
+
+        for agent_index, agent in enumerate(self.world.agents):
+            if not bool(self.active_agents[env_index, agent_index]):
+                continue
+
+            color = self._render_color(agent.color, env_index)
+            if self.render_sensor_range:
+                sensor_circle = rendering.make_circle(
+                    float(self.sensor_radius),
+                    filled=True,
+                )
+                sensor_xform = rendering.Transform()
+                sensor_circle.add_attr(sensor_xform)
+                sensor_pos = agent.state.pos[env_index].detach().cpu()
+                sensor_xform.set_translation(float(sensor_pos[0]), float(sensor_pos[1]))
+                sensor_circle.set_color(
+                    color[0],
+                    color[1],
+                    color[2],
+                    alpha=float(self.sensor_range_alpha),
+                )
+                geoms.append(sensor_circle)
+
+            if (
+                self.render_recent_rrt_candidates
+                and bool(self.recent_decision_ttl[env_index, agent_index] > 0)
+            ):
+                geoms.extend(
+                    self._make_rrt_candidate_geoms(
+                        env_index,
+                        agent_index,
+                        agent,
+                        color,
+                        rendering,
+                    )
+                )
+
+            if self.render_assigned_goals:
+                marker_radius = (
+                    max(float(self.goal_radius) * 0.5, float(self.agent_radius) * 0.5)
+                    if self.goal_marker_radius is None
+                    else float(self.goal_marker_radius)
+                )
+                goal_circle = rendering.make_circle(marker_radius, filled=False)
+                goal_xform = rendering.Transform()
+                goal_circle.add_attr(goal_xform)
+                goal = self.assigned_goals[env_index, agent_index].detach().cpu()
+                goal_xform.set_translation(float(goal[0]), float(goal[1]))
+                goal_circle.set_color(
+                    color[0],
+                    color[1],
+                    color[2],
+                    alpha=float(self.goal_marker_alpha),
+                )
+                geoms.append(goal_circle)
+
         if self.comms_rendering_range <= 0:
             return geoms
-        from vmas.simulator import rendering
 
         for i, agent1 in enumerate(self.world.agents):
             for j, agent2 in enumerate(self.world.agents):
@@ -312,6 +406,84 @@ class SarScenario(BaseScenario):
                     line.set_color(*Color.BLACK.value)
                     geoms.append(line)
         return geoms
+
+    def _make_entropy_render_image(self, env_index: int, rendering):
+        entropy = self._render_entropy_map(env_index).detach().cpu().numpy()
+        entropy = np.clip(entropy, 0.0, 1.0)
+        low = np.asarray([255.0, 240.0, 190.0], dtype=np.float32)
+        high = np.asarray([247.0, 130.0, 142.0], dtype=np.float32)
+        rgb = low[None, None, :] * (1.0 - entropy[..., None]) + high[None, None, :] * entropy[..., None]
+        alpha = np.full((*entropy.shape, 1), 255.0 * float(self.entropy_map_alpha), dtype=np.float32)
+        image = np.concatenate([rgb, alpha], axis=-1).astype(np.uint8)
+        image = np.transpose(image, (1, 0, 2))
+        return rendering.Image(
+            image,
+            -self.world_size / 2.0,
+            -self.world_size / 2.0,
+            self.cell_size,
+        )
+
+    def _render_entropy_map(self, env_index: int) -> Tensor:
+        entropy = self._compute_entropy(self.belief_maps[env_index])
+        return entropy.min(dim=0).values
+
+    def _make_entropy_grid_lines(self, rendering) -> "List[Geom]":
+        geoms: List[Geom] = []
+        world_min = -self.world_size / 2.0
+        world_max = self.world_size / 2.0
+        color = (0.35, 0.35, 0.35)
+        for index in range(self.map_dim + 1):
+            coord = world_min + index * self.cell_size
+            vertical = rendering.Line((coord, world_min), (coord, world_max), width=0.25)
+            vertical.set_color(*color, alpha=float(self.entropy_grid_alpha))
+            geoms.append(vertical)
+            horizontal = rendering.Line((world_min, coord), (world_max, coord), width=0.25)
+            horizontal.set_color(*color, alpha=float(self.entropy_grid_alpha))
+            geoms.append(horizontal)
+        return geoms
+
+    def _make_rrt_candidate_geoms(
+        self,
+        env_index: int,
+        agent_index: int,
+        agent: Agent,
+        color: tuple[float, float, float],
+        rendering,
+    ) -> "List[Geom]":
+        geoms: List[Geom] = []
+        candidates = self.recent_rrt_candidate_world[env_index, agent_index].detach().cpu()
+        for candidate_index, candidate_pos in enumerate(candidates):
+            base_radius = (
+                self.agent_radius * 0.35
+                if self.rrt_candidate_radius is None
+                else float(self.rrt_candidate_radius)
+            )
+            radius = float(base_radius) * (1.45 if candidate_index == 0 else 1.0)
+            marker = rendering.make_circle(radius, filled=candidate_index == 0)
+            marker_xform = rendering.Transform()
+            marker.add_attr(marker_xform)
+            marker_xform.set_translation(float(candidate_pos[0]), float(candidate_pos[1]))
+            marker.set_color(
+                color[0],
+                color[1],
+                color[2],
+                alpha=float(self.rrt_candidate_alpha),
+            )
+            geoms.append(marker)
+        return geoms
+
+    @staticmethod
+    def _render_color(color, env_index: int) -> tuple[float, float, float]:
+        if hasattr(color, "value"):
+            color = color.value
+        if isinstance(color, torch.Tensor):
+            if color.ndim > 1:
+                color = color[env_index]
+            color = color.detach().cpu().tolist()
+        values = list(color)
+        if len(values) < 3:
+            return (0.0, 0.0, 0.0)
+        return (float(values[0]), float(values[1]), float(values[2]))
 
     def set_high_level_assignments(
         self,
@@ -331,7 +503,25 @@ class SarScenario(BaseScenario):
         self.goal_done = torch.where(mask, torch.zeros_like(self.goal_done), self.goal_done)
         self.previous_goal_dist = self._goal_distances()
 
+    def mark_recent_high_level_decisions(
+        self,
+        mask: Tensor,
+        candidate_world: Tensor | None = None,
+    ) -> None:
+        ttl = torch.full_like(
+            self.recent_decision_ttl,
+            int(self.recent_decision_render_steps),
+        )
+        self.recent_decision_ttl = torch.where(mask, ttl, self.recent_decision_ttl)
+        if candidate_world is not None:
+            self.recent_rrt_candidate_world = torch.where(
+                mask.unsqueeze(-1).unsqueeze(-1),
+                candidate_world,
+                self.recent_rrt_candidate_world,
+            )
+
     def _compute_step_rewards(self) -> None:
+        self.recent_decision_ttl = torch.clamp(self.recent_decision_ttl - 1, min=0)
         goal_dist = self._goal_distances()
         self.goal_done = (goal_dist <= self.goal_radius) & self.active_agents
 

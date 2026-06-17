@@ -54,6 +54,19 @@ DEFAULT_SAR_CONFIG: dict[str, Any] = {
     "rrt_max_iter": 40,
     "enable_rrt_candidates": True,
     "comms_rendering_range": 0.0,
+    "render_sensor_range": True,
+    "render_assigned_goals": True,
+    "render_entropy_map": True,
+    "render_entropy_grid": True,
+    "render_recent_rrt_candidates": True,
+    "sensor_range_alpha": 0.12,
+    "goal_marker_alpha": 0.9,
+    "goal_marker_radius": None,
+    "entropy_map_alpha": 0.55,
+    "entropy_grid_alpha": 0.12,
+    "rrt_candidate_alpha": 0.95,
+    "rrt_candidate_radius": None,
+    "recent_decision_render_steps": 5,
 }
 
 
