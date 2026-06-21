@@ -208,6 +208,8 @@ def transitions_to_batch(
         "target_nodes": stack("target_nodes").float(),
         "target_mask": stack("target_mask").bool(),
         "map_channels": stack("map_channels").float(),
+        "global_map_channels": stack("global_map_channels").float(),
+        "global_agent_nodes": stack("global_agent_nodes").float(),
         "explore_edges": stack("explore_edges").float(),
         "target_edges": stack("target_edges").float(),
         "action_mask": stack("action_mask").bool(),

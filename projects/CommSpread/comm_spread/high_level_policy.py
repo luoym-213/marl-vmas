@@ -214,7 +214,13 @@ class HGSARActorCriticPolicy(torch.nn.Module):
         )
 
     def _values(self, obs: dict[str, Tensor]) -> Tensor:
-        return self.critic(obs["map_channels"], obs["ego_node"])
+        if "global_map_channels" in obs and "global_agent_nodes" in obs:
+            return self.critic(
+                obs["global_map_channels"],
+                obs["global_agent_nodes"],
+                obs.get("agent_id"),
+            )
+        return self.critic(obs["map_channels"], obs["ego_node"], obs.get("agent_id"))
 
     def _update_stats(self, obs: dict[str, Tensor], logits: Tensor, actions: Tensor) -> None:
         action_mask = obs["action_mask"].bool()

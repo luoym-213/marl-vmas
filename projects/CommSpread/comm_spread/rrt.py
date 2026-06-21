@@ -18,6 +18,8 @@ class RRTConfig:
     world_semidim: float = 1.0
     uniform_ratio: float = 0.3
     temperature: float = 1.0
+    gamma_rrt: float = 0.9
+    gamma_voronoi: float = 0.3
 
 
 def world_to_grid(
@@ -118,7 +120,7 @@ def _plan_single(
     cfg: RRTConfig,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    sample_points = np.argwhere(voronoi_mask)
+    sample_points = np.argwhere(np.ones_like(entropy_map, dtype=bool))
     if sample_points.size == 0:
         sample_points = _fallback_points(start_grid, entropy_map.shape[0])
 
@@ -128,7 +130,13 @@ def _plan_single(
         weights = np.ones_like(weights)
     weights = weights / weights.sum()
 
-    tree = [np.asarray(start_grid, dtype=np.float32)]
+    start_grid = np.asarray(start_grid, dtype=np.int64)
+    start_value = _soft_voronoi_factor(start_grid, voronoi_mask, cfg) * _local_entropy(
+        entropy_map,
+        start_grid,
+        cfg.value_radius,
+    )
+    tree = [(start_grid.astype(np.float32), float(start_value))]
     scored: list[tuple[float, int, int]] = []
     for _ in range(max(cfg.max_iterations, cfg.top_k)):
         if rng.random() < cfg.uniform_ratio:
@@ -136,7 +144,10 @@ def _plan_single(
         else:
             sample = sample_points[rng.choice(len(sample_points), p=weights)]
 
-        nearest = min(tree, key=lambda node: float(np.linalg.norm(sample - node)))
+        nearest, parent_value = min(
+            tree,
+            key=lambda item: float(np.linalg.norm(sample - item[0])),
+        )
         direction = sample.astype(np.float32) - nearest
         norm = float(np.linalg.norm(direction))
         if norm > 1e-6:
@@ -144,18 +155,20 @@ def _plan_single(
         new_point = nearest + direction * cfg.expand_dis
         new_point = np.rint(new_point).astype(np.int64)
         new_point = np.clip(new_point, 0, entropy_map.shape[0] - 1)
-        if not voronoi_mask[new_point[0], new_point[1]] and len(sample_points) > 0:
-            new_point = sample
 
-        tree.append(new_point.astype(np.float32))
-        value = _local_entropy(entropy_map, new_point, cfg.value_radius)
+        local_value = _local_entropy(entropy_map, new_point, cfg.value_radius)
+        value = _soft_voronoi_factor(new_point, voronoi_mask, cfg) * (
+            cfg.gamma_rrt * parent_value + local_value
+        )
+        tree.append((new_point.astype(np.float32), float(value)))
         scored.append((value, int(new_point[0]), int(new_point[1])))
 
     if len(scored) < cfg.top_k:
         for point in sample_points:
+            local_value = _local_entropy(entropy_map, point, cfg.value_radius)
             scored.append(
                 (
-                    _local_entropy(entropy_map, point, cfg.value_radius),
+                    _soft_voronoi_factor(point, voronoi_mask, cfg) * local_value,
                     int(point[0]),
                     int(point[1]),
                 )
@@ -175,9 +188,15 @@ def _plan_single(
     while len(result) < cfg.top_k:
         x = int(np.clip(start_grid[0] + len(result), 0, entropy_map.shape[0] - 1))
         y = int(np.clip(start_grid[1], 0, entropy_map.shape[1] - 1))
-        result.append((_local_entropy(entropy_map, np.array([x, y]), cfg.value_radius), x, y))
+        point = np.array([x, y])
+        value = _soft_voronoi_factor(point, voronoi_mask, cfg) * _local_entropy(
+            entropy_map,
+            point,
+            cfg.value_radius,
+        )
+        result.append((value, x, y))
 
-    normalizer = max(float((2 * cfg.value_radius + 1) ** 2), 1.0)
+    normalizer = _value_normalizer(cfg)
     return np.asarray([[x, y, value / normalizer] for value, x, y in result], dtype=np.float32)
 
 
@@ -196,6 +215,29 @@ def _local_entropy(entropy_map: np.ndarray, point: np.ndarray, radius: int) -> f
     x0, x1 = max(0, x - radius), min(entropy_map.shape[0], x + radius + 1)
     y0, y1 = max(0, y - radius), min(entropy_map.shape[1], y + radius + 1)
     return float(entropy_map[x0:x1, y0:y1].sum())
+
+
+def _soft_voronoi_factor(
+    point: np.ndarray,
+    voronoi_mask: np.ndarray,
+    cfg: RRTConfig,
+) -> float:
+    x, y = int(point[0]), int(point[1])
+    if voronoi_mask[x, y]:
+        return 1.0
+    return float(cfg.gamma_voronoi)
+
+
+def _value_normalizer(cfg: RRTConfig) -> float:
+    local_max = max(float((2 * cfg.value_radius + 1) ** 2), 1.0)
+    iterations = max(cfg.max_iterations, cfg.top_k)
+    if abs(cfg.gamma_rrt - 1.0) < 1e-6:
+        cumulative = local_max * max(float(iterations), 1.0)
+    else:
+        cumulative = local_max * (1.0 - cfg.gamma_rrt ** max(iterations, 1)) / (
+            1.0 - cfg.gamma_rrt
+        )
+    return max(cumulative, local_max, 1.0)
 
 
 def _occupied_feature(

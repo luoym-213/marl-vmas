@@ -71,9 +71,8 @@ class HeterogeneousGraphActor(nn.Module):
         )
 
         self.q_proj = nn.Linear(node_dim, node_dim)
-        self.k_proj = nn.Linear(node_dim + 32, node_dim)
-        self.v_proj = nn.Linear(node_dim + 32, node_dim)
-        self.node_selection_head = nn.Linear(node_dim, 1)
+        self.k_proj = nn.Linear(node_dim, node_dim)
+        self.edge_bias = nn.Linear(32, 1)
         self.attn_dim = node_dim
         self.apply(_init_weights)
 
@@ -137,23 +136,13 @@ class HeterogeneousGraphActor(nn.Module):
         explore_feats = self.explore_node_linear(
             explore_feats.reshape(batch_size * n_explore, -1)
         ).view(batch_size, n_explore, -1)
-        explore_feats = self.linear_ln(explore_feats)
 
         target_feats = self.target_encoder(
             target_nodes.reshape(batch_size * n_target, -1)
         ).view(batch_size, n_target, -1)
-        target_feats = self.target_team_gat(
-            ego_nodes[:, :2],
-            teammate_nodes,
-            teammate_mask,
-            target_nodes,
-            target_valid.unsqueeze(-1).float(),
-            target_feats,
-        )
         target_feats = self.target_node_linear(
             target_feats.reshape(batch_size * n_target, -1)
         ).view(batch_size, n_target, -1)
-        target_feats = self.linear_ln(target_feats)
 
         explore_edge_feats = self.edge_encoder(
             explore_edges.reshape(batch_size * n_explore, -1)
@@ -162,12 +151,6 @@ class HeterogeneousGraphActor(nn.Module):
             target_edges.reshape(batch_size * n_target, -1)
         ).view(batch_size, n_target, -1)
 
-        explore_kv = torch.cat([explore_feats, explore_edge_feats], dim=-1)
-        target_kv = torch.cat([target_feats, target_edge_feats], dim=-1)
-        unified_kv = torch.cat([explore_kv, target_kv], dim=1)
-        unified_k = self.k_proj(unified_kv)
-        unified_v = self.v_proj(unified_kv)
-
         explore_valid = torch.ones(
             batch_size,
             n_explore,
@@ -175,55 +158,63 @@ class HeterogeneousGraphActor(nn.Module):
             device=ego_nodes.device,
         )
         valid = torch.cat([explore_valid, target_valid], dim=1)
-        all_targets_valid = target_valid.numel() > 0 and target_valid.all(dim=1)
-        if isinstance(all_targets_valid, Tensor):
-            valid[all_targets_valid, :n_explore] = False
         if action_mask is not None:
             valid = valid & _squeeze_mask(action_mask).bool()
         no_valid = ~valid.any(dim=1)
         if no_valid.any():
             valid[no_valid, :n_explore] = True
 
-        query = self.q_proj(ego_feats).unsqueeze(1)
-        attn_scores = torch.matmul(query, unified_k.transpose(1, 2)) / math.sqrt(self.attn_dim)
-        attn_scores = attn_scores.masked_fill(~valid.unsqueeze(1), torch.finfo(attn_scores.dtype).min)
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        context = torch.matmul(attn_weights, unified_v).squeeze(1)
-        logits = self.node_selection_head(unified_v + context.unsqueeze(1)).squeeze(-1)
+        task_nodes = torch.cat([explore_nodes, target_nodes], dim=1)
+        task_feats = torch.cat([explore_feats, target_feats], dim=1)
+        task_feats = self.task_team_hmpnn(
+            ego_nodes[:, :2],
+            teammate_nodes,
+            teammate_mask,
+            task_nodes,
+            valid.unsqueeze(-1).float(),
+            task_feats,
+        )
+        task_feats = self.linear_ln(task_feats)
+        edge_feats = torch.cat([explore_edge_feats, target_edge_feats], dim=1)
+
+        query = self.q_proj(ego_feats)
+        keys = self.k_proj(task_feats)
+        logits = (keys * query.unsqueeze(1)).sum(dim=-1) / math.sqrt(self.attn_dim)
+        logits = logits + self.edge_bias(edge_feats).squeeze(-1)
         return logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
 
-    def target_team_gat(
+    def task_team_hmpnn(
         self,
         ego_pos: Tensor,
         teammate_nodes: Tensor,
         teammate_mask: Tensor,
-        target_nodes: Tensor,
-        target_mask: Tensor,
-        target_node_feats: Tensor,
+        task_nodes: Tensor,
+        task_mask: Tensor,
+        task_node_feats: Tensor,
     ) -> Tensor:
-        batch_size, n_targets, _ = target_nodes.shape
+        batch_size, n_tasks, _ = task_nodes.shape
         n_teammates = teammate_nodes.shape[1]
 
-        target_abs_pos = ego_pos.unsqueeze(1) + target_nodes[..., 0:2]
+        task_abs_pos = ego_pos.unsqueeze(1) + task_nodes[..., 0:2]
         teammate_abs_pos = teammate_nodes[..., 0:2]
-        teammate_rel_to_target = teammate_abs_pos.unsqueeze(1) - target_abs_pos.unsqueeze(2)
+        teammate_rel_to_task = teammate_abs_pos.unsqueeze(1) - task_abs_pos.unsqueeze(2)
         teammate_other_feats = teammate_nodes[..., 2:].unsqueeze(1).expand(
             batch_size,
-            n_targets,
+            n_tasks,
             n_teammates,
             -1,
         )
-        teammate_nodes_per_target = torch.cat(
-            [teammate_rel_to_target, teammate_other_feats],
+        teammate_nodes_per_task = torch.cat(
+            [teammate_rel_to_task, teammate_other_feats],
             dim=-1,
         )
         teammate_feats = self.teammate_encoder(
-            teammate_nodes_per_target.reshape(batch_size * n_targets * n_teammates, -1)
-        ).view(batch_size, n_targets, n_teammates, -1)
+            teammate_nodes_per_task.reshape(batch_size * n_tasks * n_teammates, -1)
+        ).view(batch_size, n_tasks, n_teammates, -1)
 
-        target_query = target_node_feats.unsqueeze(2)
+        task_query = task_node_feats.unsqueeze(2)
         attn_scores = torch.matmul(
-            target_query,
+            task_query,
             teammate_feats.transpose(-2, -1),
         ) / math.sqrt(self.attn_dim)
         teammate_mask_expanded = _squeeze_mask(teammate_mask).view(
@@ -232,9 +223,9 @@ class HeterogeneousGraphActor(nn.Module):
             1,
             n_teammates,
         )
-        target_mask_expanded = _squeeze_mask(target_mask).view(
+        task_mask_expanded = _squeeze_mask(task_mask).view(
             batch_size,
-            n_targets,
+            n_tasks,
             1,
             1,
         )
@@ -242,15 +233,16 @@ class HeterogeneousGraphActor(nn.Module):
             teammate_mask_expanded < 0.5,
             torch.finfo(attn_scores.dtype).min,
         )
-        attn_scores = attn_scores.masked_fill(
-            target_mask_expanded < 0.5,
-            torch.finfo(attn_scores.dtype).min,
-        )
+        has_teammate = (teammate_mask_expanded.sum(dim=-1, keepdim=True) > 0)
+        attn_scores = torch.where(has_teammate, attn_scores, torch.zeros_like(attn_scores))
         attn_weights = torch.softmax(attn_scores, dim=-1) * teammate_mask_expanded
-        target_aggregated = torch.matmul(attn_weights, teammate_feats).squeeze(2)
-        has_teammate = (teammate_mask_expanded.sum(dim=-1) > 0).float()
-        target_aggregated = target_aggregated * has_teammate * target_mask_expanded.squeeze(-1)
-        return target_node_feats + target_aggregated
+        task_aggregated = torch.matmul(attn_weights, teammate_feats).squeeze(2)
+        task_aggregated = (
+            task_aggregated
+            * has_teammate.squeeze(-1).float()
+            * task_mask_expanded.squeeze(-1)
+        )
+        return task_node_feats + task_aggregated
 
 
 class HighLevelMapCritic(nn.Module):
@@ -279,19 +271,50 @@ class HighLevelMapCritic(nn.Module):
         )
         self.agent_encoder = _mlp(agent_features, 64)
         self.value = nn.Sequential(
-            nn.Linear(256 + 64, hidden_dim),
+            nn.Linear(256 + 128, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
         self.apply(_init_weights)
 
-    def forward(self, maps: Tensor, agent_nodes: Tensor) -> Tensor:
-        map_features = self.map_backbone(maps)
-        agent_features = self.agent_encoder(agent_nodes)
-        if agent_nodes.ndim == 2:
-            return self.value(torch.cat([map_features, agent_features], dim=-1))
-        map_features = map_features.unsqueeze(1).expand(-1, self.n_agents, -1)
-        return self.value(torch.cat([map_features, agent_features], dim=-1)).squeeze(-1)
+    def forward(
+        self,
+        maps: Tensor,
+        agent_nodes: Tensor,
+        agent_ids: Tensor | None = None,
+    ) -> Tensor:
+        if maps.ndim == 4:
+            map_features = self.map_backbone(maps)
+            agent_features = self.agent_encoder(agent_nodes)
+            return self.value(
+                torch.cat([map_features, agent_features, agent_features], dim=-1)
+            )
+
+        batch_size, n_agents = maps.shape[:2]
+        map_features = self.map_backbone(
+            maps.reshape(batch_size * n_agents, *maps.shape[2:])
+        ).view(batch_size, n_agents, -1)
+        global_map_features = map_features.mean(dim=1)
+
+        agent_features = self.agent_encoder(
+            agent_nodes.reshape(batch_size * n_agents, -1)
+        ).view(batch_size, n_agents, -1)
+        global_agent_features = agent_features.mean(dim=1)
+        if agent_ids is None:
+            selected_agent_features = global_agent_features
+        else:
+            gather_ids = agent_ids.long().view(batch_size, 1, 1).expand(
+                -1,
+                1,
+                agent_features.shape[-1],
+            )
+            selected_agent_features = agent_features.gather(1, gather_ids).squeeze(1)
+        return self.value(
+            torch.cat(
+                [global_map_features, global_agent_features, selected_agent_features],
+                dim=-1,
+            )
+        )
 
 
 def _mlp(input_dim: int, output_dim: int) -> nn.Sequential:

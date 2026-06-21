@@ -28,6 +28,8 @@ class HighLevelTransition:
     target_nodes: Tensor
     target_mask: Tensor
     map_channels: Tensor
+    global_map_channels: Tensor
+    global_agent_nodes: Tensor
     explore_edges: Tensor
     target_edges: Tensor
     action_mask: Tensor
@@ -196,6 +198,8 @@ class AsyncSMDPCollector:
                 "target_nodes": obs["target_nodes"][i].detach().clone(),
                 "target_mask": obs["target_mask"][i].detach().clone(),
                 "map_channels": obs["map_channels"][i].detach().clone(),
+                "global_map_channels": obs["global_map_channels"][i].detach().clone(),
+                "global_agent_nodes": obs["global_agent_nodes"][i].detach().clone(),
                 "explore_edges": obs["explore_edges"][i].detach().clone(),
                 "target_edges": obs["target_edges"][i].detach().clone(),
                 "action_mask": obs["action_mask"][i].detach().clone(),
@@ -232,6 +236,8 @@ class AsyncSMDPCollector:
                     target_nodes=pending["target_nodes"],
                     target_mask=pending["target_mask"],
                     map_channels=pending["map_channels"],
+                    global_map_channels=pending["global_map_channels"],
+                    global_agent_nodes=pending["global_agent_nodes"],
                     explore_edges=pending["explore_edges"],
                     target_edges=pending["target_edges"],
                     action_mask=pending["action_mask"],
@@ -292,6 +298,8 @@ class AsyncSMDPCollector:
             "target_nodes": target_nodes_all[env_ids, agent_ids],
             "target_mask": target_mask_all[env_ids, agent_ids],
             "map_channels": map_channels_all[env_ids, agent_ids],
+            "global_map_channels": map_channels_all[env_ids],
+            "global_agent_nodes": ego_nodes_all[env_ids],
             "explore_edges": explore_edges_all[env_ids, agent_ids],
             "target_edges": target_edges_all[env_ids, agent_ids],
             "action_mask": action_mask_all[env_ids, agent_ids],

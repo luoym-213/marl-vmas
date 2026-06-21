@@ -47,6 +47,8 @@ def main() -> None:
         print(f"target_mask shape={tuple(first.target_mask.shape)}")
         print(f"action_mask shape={tuple(first.action_mask.shape)}")
         print(f"map_channels shape={tuple(first.map_channels.shape)}")
+        print(f"global_map_channels shape={tuple(first.global_map_channels.shape)}")
+        print(f"global_agent_nodes shape={tuple(first.global_agent_nodes.shape)}")
 
 
 if __name__ == "__main__":
