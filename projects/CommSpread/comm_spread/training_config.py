@@ -69,7 +69,7 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "distance_reward_scale": 1.0,
         "collision_penalty": -10.0,
         "collision_distance": 0.0,
-        "collision_safe_distance": 0.06,
+        "collision_safe_distance": 0.02,
         "max_collision_penalty": -20.0,
         "boundary_penalty": -5.0,
         "time_penalty": 0.0,
