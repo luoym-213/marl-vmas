@@ -13,3 +13,22 @@ projects/CustormVmasBenchmarl/outputs/
 
 projects/CustormVmasBenchmarl/mappo_navigation_mlp__*/
 
+projects/comm_limited_vmas/outputs/
+
+projects/comm_limited_vmas/**/checkpoints/
+
+projects/comm_limited_vmas/**/videos/
+
+*.pt
+
+*.pth
+
+*.ckpt
+
+*.mp4
+
+*.gif
+
+*.log
+
+.DS_Store

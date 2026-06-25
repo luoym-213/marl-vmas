@@ -1,0 +1,4 @@
+mode: full
+comm_radius: null
+dropout_prob: 0.0
+delay_steps: 0

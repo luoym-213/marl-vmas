@@ -1,0 +1,6 @@
+scenario: comm_spread
+n_agents: 3
+continuous_actions: true
+shared_reward: true
+collisions: true
+max_steps: 100
