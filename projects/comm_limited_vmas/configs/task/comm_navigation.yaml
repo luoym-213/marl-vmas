@@ -1,0 +1,11 @@
+scenario: comm_navigation
+n_agents: 3
+continuous_actions: true
+max_steps: 100
+collisions: true
+agents_with_same_goal: 1
+split_goals: false
+observe_all_goals: false
+shared_rew: false
+lidar_range: 0.35
+agent_radius: 0.1

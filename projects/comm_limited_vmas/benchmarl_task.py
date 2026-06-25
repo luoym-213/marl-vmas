@@ -16,6 +16,9 @@ from torchrl.envs import EnvBase
 from benchmarl.environments.common import Task
 from benchmarl.utils import DEVICE_TYPING
 
+from comm_limited_vmas.scenarios.comm_navigation import (
+    Scenario as CommNavigationScenario,
+)
 from comm_limited_vmas.scenarios.comm_spread import Scenario as CommSpreadScenario
 
 
@@ -24,6 +27,7 @@ class CommLimitedVmasTask(Task):
 
     # 注意：如果以后有多个任务，不要都写成 None。
     # Python Enum 中多个相同值会变成 alias。
+    COMM_NAVIGATION = "comm_navigation"
     COMM_SPREAD = "comm_spread"
     # 后面可以继续加：
     # COMM_DISCOVERY = "comm_discovery"
@@ -45,7 +49,9 @@ class CommLimitedVmasTask(Task):
         config.pop("scenario", None)
         config.pop("continuous_actions", None)
 
-        if self.name == "COMM_SPREAD":
+        if self.name == "COMM_NAVIGATION":
+            scenario_cls = CommNavigationScenario
+        elif self.name == "COMM_SPREAD":
             scenario_cls = CommSpreadScenario
         else:
             raise ValueError(f"Unknown task: {self.name}")
@@ -135,6 +141,7 @@ def build_comm_vmas_task(
     """Build a BenchMARL-compatible communication-limited VMAS task."""
 
     task_map = {
+        "comm_navigation": CommLimitedVmasTask.COMM_NAVIGATION,
         "comm_spread": CommLimitedVmasTask.COMM_SPREAD,
     }
 

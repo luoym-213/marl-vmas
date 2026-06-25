@@ -83,6 +83,27 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override experiment learning rate.",
+    )
+
+    parser.add_argument(
+        "--ppo-iters",
+        type=int,
+        default=None,
+        help="Override on-policy minibatch optimization iterations.",
+    )
+
+    parser.add_argument(
+        "--minibatch-size",
+        type=int,
+        default=None,
+        help="Override on-policy minibatch size.",
+    )
+
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="Use a small debug training setting.",
@@ -152,11 +173,12 @@ def apply_training_profile(
 
     experiment_config.on_policy_collected_frames_per_batch = 60_000
     experiment_config.on_policy_n_envs_per_worker = 600
-    experiment_config.on_policy_n_minibatch_iters = 45
+    experiment_config.on_policy_n_minibatch_iters = 20
     experiment_config.on_policy_minibatch_size = 4096
+    experiment_config.lr = 3e-5
     experiment_config.evaluation_interval = 120_000
     experiment_config.render = False
-    experiment_config.checkpoint_interval = 1_200_000
+    experiment_config.checkpoint_interval = 600_000
     experiment_config.checkpoint_at_end = True
     experiment_config.keep_checkpoints_num = 5
 
@@ -185,6 +207,15 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
 
     if args.max_n_frames is not None:
         experiment_config.max_n_frames = args.max_n_frames
+
+    if args.lr is not None:
+        experiment_config.lr = args.lr
+
+    if args.ppo_iters is not None:
+        experiment_config.on_policy_n_minibatch_iters = args.ppo_iters
+
+    if args.minibatch_size is not None:
+        experiment_config.on_policy_minibatch_size = args.minibatch_size
 
     save_folder = (
         PROJECT_ROOT

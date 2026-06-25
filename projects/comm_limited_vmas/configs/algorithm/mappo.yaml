@@ -1,1 +1,9 @@
-{}
+share_param_critic: true
+clip_epsilon: 0.2
+entropy_coef: 0.001
+critic_coef: 1.0
+loss_critic_type: l2
+lmbda: 0.9
+scale_mapping: biased_softplus_1.0
+use_tanh_normal: true
+minibatch_advantage: false
