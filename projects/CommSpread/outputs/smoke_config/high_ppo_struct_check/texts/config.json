@@ -1,0 +1,20 @@
+{
+  "low_level_checkpoint": "outputs/sar_low_full/mappo_sar_low_mlp__f4788a9a_26_06_17-04_08_10/checkpoints/checkpoint_50040000.pt",
+  "resume_checkpoint": null,
+  "num_envs": 4,
+  "low_level_steps_per_batch": 40,
+  "updates": 1,
+  "ppo_epochs": 1,
+  "minibatch_size": 16,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "clip_eps": 0.2,
+  "entropy_coef": 0.01,
+  "value_coef": 0.5,
+  "lr": 0.0003,
+  "max_grad_norm": 0.5,
+  "seed": 0,
+  "device": "cpu",
+  "save_folder": "outputs/smoke_config/high_ppo_struct_check",
+  "save_interval": 10
+}

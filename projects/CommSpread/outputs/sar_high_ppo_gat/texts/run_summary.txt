@@ -1,0 +1,42 @@
+SAR High-Level PPO Run Summary
+status: complete
+updated_at: 2026-06-21T11:01:09
+command: /workspace/projects/CommSpread/scripts/train_high_ppo_sar.py --low-level-checkpoint outputs/sar_low_full/low_safe_0.02/checkpoints/checkpoint_50040000.pt --num-envs 64 --low-level-steps-per-batch 400 --updates 200 --ppo-epochs 4 --minibatch-size 512 --device cuda --save-folder outputs/sar_high_ppo_gat
+low_level_checkpoint: outputs/sar_low_full/low_safe_0.02/checkpoints/checkpoint_50040000.pt
+device: cuda
+num_envs: 64
+low_level_steps_per_batch: 400
+updates: 200
+ppo_epochs: 4
+minibatch_size: 512
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+entropy_coef: 0.01
+value_coef: 0.5
+lr: 0.0003
+max_grad_norm: 0.5
+final_update: 200
+latest_checkpoint: outputs/sar_high_ppo_gat/checkpoints/latest.pt
+
+last_metrics:
+  update: 200
+  transitions: 841
+  high_reward_mean: 2.012728691101074
+  high_reward_sum: 1692.704833984375
+  duration_mean: 16.243757247924805
+  detected_targets_mean: 1.75
+  visited_targets_mean: 1.59375
+  retired_agents_mean: 1.59375
+  success_rate: 0.078125
+  entropy_reduction_mean: 2484.623046875
+  actor_explore_actions: 735
+  actor_target_actions: 106
+  actor_invalid_actions: 0
+  actor_nonfinite_logits: 0
+  actor_valid_target_actions: 106
+  policy_loss: -0.00586199015378952
+  value_loss: 38.486881256103516
+  entropy: 0.9382022619247437
+  approx_kl: 0.0008694984717294574
+  clip_fraction: 0.006864878349006176

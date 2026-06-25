@@ -1,0 +1,42 @@
+SAR High-Level PPO Run Summary
+status: complete
+updated_at: 2026-06-21T06:21:46
+command: /workspace/projects/CommSpread/scripts/train_high_ppo_sar.py --low-level-checkpoint outputs/sar_low_full/mappo_sar_low_mlp__f4788a9a_26_06_17-04_08_10/checkpoints/checkpoint_50040000.pt --num-envs 4 --low-level-steps-per-batch 40 --updates 1 --ppo-epochs 1 --minibatch-size 16 --device cpu --save-folder outputs/smoke_config/high_ppo_struct_check
+low_level_checkpoint: outputs/sar_low_full/mappo_sar_low_mlp__f4788a9a_26_06_17-04_08_10/checkpoints/checkpoint_50040000.pt
+device: cpu
+num_envs: 4
+low_level_steps_per_batch: 40
+updates: 1
+ppo_epochs: 1
+minibatch_size: 16
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+entropy_coef: 0.01
+value_coef: 0.5
+lr: 0.0003
+max_grad_norm: 0.5
+final_update: 1
+latest_checkpoint: outputs/smoke_config/high_ppo_struct_check/checkpoints/latest.pt
+
+last_metrics:
+  update: 1
+  transitions: 30
+  high_reward_mean: 0.18070459365844727
+  high_reward_sum: 5.421137809753418
+  duration_mean: 14.533333778381348
+  detected_targets_mean: 0.5
+  visited_targets_mean: 0.0
+  retired_agents_mean: 0.0
+  success_rate: 0.0
+  entropy_reduction_mean: 2117.0009765625
+  actor_explore_actions: 41
+  actor_target_actions: 1
+  actor_invalid_actions: 0
+  actor_nonfinite_logits: 0
+  actor_valid_target_actions: 1
+  policy_loss: -0.0017850613221526146
+  value_loss: 0.14676925539970398
+  entropy: 1.6322715282440186
+  approx_kl: 7.918902724668442e-07
+  clip_fraction: 0.0

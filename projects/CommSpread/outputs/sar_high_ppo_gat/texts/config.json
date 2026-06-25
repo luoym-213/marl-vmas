@@ -1,0 +1,20 @@
+{
+  "low_level_checkpoint": "outputs/sar_low_full/low_safe_0.02/checkpoints/checkpoint_50040000.pt",
+  "resume_checkpoint": null,
+  "num_envs": 64,
+  "low_level_steps_per_batch": 400,
+  "updates": 200,
+  "ppo_epochs": 4,
+  "minibatch_size": 512,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "clip_eps": 0.2,
+  "entropy_coef": 0.01,
+  "value_coef": 0.5,
+  "lr": 0.0003,
+  "max_grad_norm": 0.5,
+  "seed": 0,
+  "device": "cuda",
+  "save_folder": "outputs/sar_high_ppo_gat",
+  "save_interval": 10
+}

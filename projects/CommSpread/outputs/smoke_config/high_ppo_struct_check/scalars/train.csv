@@ -1,0 +1,3 @@
+update,transitions,high_reward_mean,high_reward_sum,duration_mean,detected_targets_mean,visited_targets_mean,retired_agents_mean,success_rate,entropy_reduction_mean,actor_explore_actions,actor_target_actions,actor_invalid_actions,actor_nonfinite_logits,actor_valid_target_actions,policy_loss,value_loss,entropy,approx_kl,clip_fraction
+1,1,0.044743746519088745,0.044743746519088745,6.0,0.5,0.0,0.0,0.0,923.283203125,7,0,0,0,0,nan,0.03505143150687218,1.6088087558746338,0.0,0.0
+1,30,0.18070459365844727,5.421137809753418,14.533333778381348,0.5,0.0,0.0,0.0,2117.0009765625,41,1,0,0,1,-0.0017850613221526146,0.14676925539970398,1.6322715282440186,7.918902724668442e-07,0.0
