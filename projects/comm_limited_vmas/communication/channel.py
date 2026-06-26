@@ -20,7 +20,9 @@ class CommunicationChannel:
         self.mode = str(self.config.get("mode", "comm_full"))
         self.comm_radius = self.config.get("comm_radius")
         self.dropout_prob = float(self.config.get("dropout_prob") or 0.0)
-        self.max_delay = self._parse_max_delay(self.config)
+        self.delay_config = self._parse_delay_config(self.config)
+        self.delay_type = self.delay_config["type"]
+        self.max_delay = int(self.delay_config["max"])
 
     @property
     def is_full(self) -> bool:
@@ -50,6 +52,23 @@ class CommunicationChannel:
     def sample_delay(self, shape: torch.Size | tuple[int, ...], device: torch.device):
         if self.max_delay <= 0:
             return torch.zeros(shape, dtype=torch.long, device=device)
+
+        if self.delay_type == "constant":
+            return torch.full(
+                shape,
+                fill_value=self.max_delay,
+                dtype=torch.long,
+                device=device,
+            )
+
+        if self.delay_type == "geometric":
+            mean = float(self.delay_config["mean"])
+            if mean <= 0:
+                return torch.zeros(shape, dtype=torch.long, device=device)
+            probs = torch.tensor(1.0 / (mean + 1.0), device=device)
+            delay = torch.distributions.Geometric(probs=probs).sample(shape)
+            return delay.to(dtype=torch.long).clamp(max=self.max_delay)
+
         return torch.randint(
             low=0,
             high=self.max_delay + 1,
@@ -59,11 +78,26 @@ class CommunicationChannel:
         )
 
     @staticmethod
-    def _parse_max_delay(config: dict[str, Any]) -> int:
+    def _parse_delay_config(config: dict[str, Any]) -> dict[str, Any]:
         delay_config = config.get("delay")
         if isinstance(delay_config, dict):
             delay_type = delay_config.get("type", "constant")
             if delay_type == "uniform_int":
-                return int(delay_config.get("max", 0))
-            return int(delay_config.get("value", 0))
-        return int(config.get("delay_steps") or 0)
+                return {
+                    "type": "uniform_int",
+                    "max": int(delay_config.get("max", 0)),
+                }
+            if delay_type == "geometric":
+                return {
+                    "type": "geometric",
+                    "mean": float(delay_config.get("mean", 0)),
+                    "max": int(delay_config.get("max", 0)),
+                }
+            return {
+                "type": "constant",
+                "max": int(delay_config.get("value", 0)),
+            }
+        return {
+            "type": "uniform_int",
+            "max": int(config.get("delay_steps") or 0),
+        }

@@ -1,7 +1,4 @@
 mode: delay
 comm_radius: null
 dropout_prob: 0.0
-delay:
-  type: geometric
-  mean: 3
-  max: 15
+delay_steps: 5

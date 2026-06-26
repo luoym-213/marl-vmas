@@ -87,6 +87,8 @@ class Scenario(VmasNavigationScenario):
         info["cached_state"] = self._comm_manager.get_receiver_states(ego_index)
         info["mean_aoi"] = aoi.mean(dim=-1, keepdim=True)
         info["mean_comm_mask"] = comm_mask.mean(dim=-1, keepdim=True)
+        info["all_goals_reached"] = self._all_goals_reached()
+        info["pair_collision_count"] = self._pair_collision_count()
         return info
 
     @property
@@ -106,3 +108,32 @@ class Scenario(VmasNavigationScenario):
 
     def _current_agent_positions(self) -> Tensor:
         return torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
+
+    def _all_goals_reached(self) -> Tensor:
+        reached = torch.stack(
+            [
+                torch.linalg.vector_norm(
+                    agent.state.pos - agent.goal.state.pos,
+                    dim=-1,
+                )
+                < agent.shape.radius
+                for agent in self.world.agents
+            ],
+            dim=-1,
+        ).all(dim=-1, keepdim=True)
+        return reached.float()
+
+    def _pair_collision_count(self) -> Tensor:
+        count = torch.zeros(
+            self.world.batch_dim,
+            1,
+            dtype=torch.float32,
+            device=self.world.device,
+        )
+        for i, agent in enumerate(self.world.agents):
+            for other in self.world.agents[i + 1 :]:
+                distance = self.world.get_distance(agent, other)
+                count += (distance <= self.min_collision_distance).float().unsqueeze(
+                    -1
+                )
+        return count

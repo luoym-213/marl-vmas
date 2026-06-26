@@ -1,4 +1,7 @@
 mode: radius_delay_dropout
 comm_radius: 1.5
 dropout_prob: 0.1
-delay_steps: 5
+delay:
+  type: geometric
+  mean: 3
+  max: 15
