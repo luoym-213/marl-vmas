@@ -2,6 +2,7 @@
 
 from comm_limited_vmas.communication.cache import AgentStateCache
 from comm_limited_vmas.communication.channel import CommunicationChannel
+from comm_limited_vmas.communication.delay_buffer import TensorDelayBuffer
 from comm_limited_vmas.communication.delay_queue import (
     ArrivedMessage,
     DelayQueue,
@@ -16,4 +17,5 @@ __all__ = [
     "CommunicationManager",
     "DelayQueue",
     "QueuedMessage",
+    "TensorDelayBuffer",
 ]

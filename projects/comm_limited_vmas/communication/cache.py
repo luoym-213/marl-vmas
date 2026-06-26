@@ -85,6 +85,17 @@ class AgentStateCache:
             return accepted_envs
         return env_indices.new_empty((0,))
 
+    def update_many(
+        self,
+        states_by_sender: Tensor,
+        send_steps: Tensor,
+        valid_mask: Tensor,
+    ) -> Tensor:
+        accepted = valid_mask & (send_steps > self.t_last)
+        self.x_last[accepted] = states_by_sender[accepted]
+        self.t_last[accepted] = send_steps[accepted]
+        return accepted
+
     def get_state(self, receiver: int, sender: int) -> Tensor:
         return self.x_last[:, receiver, sender]
 
