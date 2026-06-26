@@ -1,0 +1,9 @@
+scenario: comm_flocking
+n_agents: 4
+n_obstacles: 5
+continuous_actions: true
+max_steps: 100
+n_lidar_rays: 12
+collision_reward: -0.1
+dist_shaping_factor: 1
+min_dist_between_entities: 0.15

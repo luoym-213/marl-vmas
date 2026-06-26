@@ -22,6 +22,9 @@ from comm_limited_vmas.scenarios.comm_discovery import (
 from comm_limited_vmas.scenarios.comm_dispersion import (
     Scenario as CommDispersionScenario,
 )
+from comm_limited_vmas.scenarios.comm_flocking import (
+    Scenario as CommFlockingScenario,
+)
 from comm_limited_vmas.scenarios.comm_navigation import (
     Scenario as CommNavigationScenario,
 )
@@ -37,8 +40,7 @@ class CommLimitedVmasTask(Task):
     COMM_SPREAD = "comm_spread"
     COMM_DISCOVERY = "comm_discovery"
     COMM_DISPERSION = "comm_dispersion"
-    # 后面可以继续加：
-    # COMM_FLOCKING = "comm_flocking"
+    COMM_FLOCKING = "comm_flocking"
 
     def get_env_fun(
         self,
@@ -63,6 +65,8 @@ class CommLimitedVmasTask(Task):
             scenario_cls = CommDiscoveryScenario
         elif self.name == "COMM_DISPERSION":
             scenario_cls = CommDispersionScenario
+        elif self.name == "COMM_FLOCKING":
+            scenario_cls = CommFlockingScenario
         else:
             raise ValueError(f"Unknown task: {self.name}")
 
@@ -155,6 +159,7 @@ def build_comm_vmas_task(
         "comm_spread": CommLimitedVmasTask.COMM_SPREAD,
         "comm_discovery": CommLimitedVmasTask.COMM_DISCOVERY,
         "comm_dispersion": CommLimitedVmasTask.COMM_DISPERSION,
+        "comm_flocking": CommLimitedVmasTask.COMM_FLOCKING,
     }
 
     if task_name not in task_map:
