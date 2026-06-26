@@ -248,6 +248,7 @@ def summarize_rollout(task_name: str, rollout, max_steps: int) -> dict[str, floa
     summarizers: dict[str, Callable[[Any, int], dict[str, float]]] = {
         "comm_navigation": summarize_comm_navigation,
         "comm_discovery": summarize_comm_discovery,
+        "comm_dispersion": summarize_comm_dispersion,
     }
     if task_name not in summarizers:
         raise ValueError(
@@ -358,6 +359,45 @@ def summarize_comm_discovery(rollout, max_steps: int) -> dict[str, float]:
     return metrics
 
 
+def summarize_comm_dispersion(rollout, max_steps: int) -> dict[str, float]:
+    done = rollout["next", "done"].squeeze(-1).bool()
+    success = done.any(dim=1)
+    episode_len = first_done_lengths(done, max_steps)
+    valid = valid_step_mask(episode_len, done.shape[1])
+
+    reward = rollout["next", "agents", "reward"].squeeze(-1)
+    valid_reward = reward * valid.unsqueeze(-1)
+    per_agent_return = valid_reward.sum(dim=1)
+    episode_return = per_agent_return.mean(dim=-1)
+    team_return = per_agent_return.sum(dim=-1)
+
+    metrics = {
+        "episodes": float(done.shape[0]),
+        "success_rate": tensor_mean(success.float()),
+        "timeout_rate": tensor_mean((~success).float()),
+        **stats("episode_len", episode_len.float()),
+        **stats("episode_return", episode_return),
+        "team_return_mean": tensor_mean(team_return),
+    }
+
+    info_prefix = ("next", "agents", "info")
+    if has_key(rollout, (*info_prefix, "food_eaten")):
+        food_eaten = rollout[(*info_prefix, "food_eaten")].squeeze(-1)
+        agent0_food_eaten = food_eaten[..., 0]
+        episode_food_eaten = (agent0_food_eaten * valid).max(dim=1).values
+        metrics.update(stats("food_eaten", episode_food_eaten))
+
+    if has_key(rollout, (*info_prefix, "mean_aoi")):
+        mean_aoi = rollout[(*info_prefix, "mean_aoi")].squeeze(-1)
+        metrics["mean_aoi"] = masked_mean(mean_aoi, valid)
+
+    if has_key(rollout, (*info_prefix, "mean_comm_mask")):
+        mean_comm_mask = rollout[(*info_prefix, "mean_comm_mask")].squeeze(-1)
+        metrics["mean_comm_mask"] = masked_mean(mean_comm_mask, valid)
+
+    return metrics
+
+
 def filter_metrics(
     task_name: str,
     summary: dict[str, float],
@@ -381,6 +421,13 @@ def filter_metrics(
             "episode_len": ("episode_len_",),
             "coverage": ("targets_covered_",),
             "collision_penalty": ("collision_penalty_",),
+            "communication": ("mean_aoi", "mean_comm_mask"),
+        },
+        "comm_dispersion": {
+            "reward": ("episode_return_", "team_return_mean"),
+            "success_rate": ("success_rate", "timeout_rate"),
+            "episode_len": ("episode_len_",),
+            "food": ("food_eaten_",),
             "communication": ("mean_aoi", "mean_comm_mask"),
         },
     }

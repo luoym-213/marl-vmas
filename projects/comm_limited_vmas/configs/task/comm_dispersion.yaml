@@ -1,0 +1,8 @@
+scenario: comm_dispersion
+n_agents: 4
+continuous_actions: true
+max_steps: 100
+share_reward: false
+penalise_by_time: false
+food_radius: 0.05
+pos_range: 1.0
