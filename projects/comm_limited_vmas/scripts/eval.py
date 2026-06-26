@@ -247,6 +247,7 @@ def run_rollout(
 def summarize_rollout(task_name: str, rollout, max_steps: int) -> dict[str, float]:
     summarizers: dict[str, Callable[[Any, int], dict[str, float]]] = {
         "comm_navigation": summarize_comm_navigation,
+        "comm_discovery": summarize_comm_discovery,
     }
     if task_name not in summarizers:
         raise ValueError(
@@ -302,6 +303,61 @@ def summarize_comm_navigation(rollout, max_steps: int) -> dict[str, float]:
     return metrics
 
 
+def summarize_comm_discovery(rollout, max_steps: int) -> dict[str, float]:
+    done = rollout["next", "done"].squeeze(-1).bool()
+    success = done.any(dim=1)
+    episode_len = first_done_lengths(done, max_steps)
+    valid = valid_step_mask(episode_len, done.shape[1])
+
+    reward = rollout["next", "agents", "reward"].squeeze(-1)
+    valid_reward = reward * valid.unsqueeze(-1)
+    per_agent_return = valid_reward.sum(dim=1)
+    episode_return = per_agent_return.mean(dim=-1)
+    team_return = per_agent_return.sum(dim=-1)
+
+    metrics = {
+        "episodes": float(done.shape[0]),
+        "success_rate": tensor_mean(success.float()),
+        "timeout_rate": tensor_mean((~success).float()),
+        **stats("episode_len", episode_len.float()),
+        **stats("episode_return", episode_return),
+        "team_return_mean": tensor_mean(team_return),
+    }
+
+    info_prefix = ("next", "agents", "info")
+    if has_key(rollout, (*info_prefix, "targets_covered")):
+        targets_covered = rollout[(*info_prefix, "targets_covered")]
+        if targets_covered.ndim > valid.ndim + 1 and targets_covered.shape[-1] == 1:
+            targets_covered = targets_covered.squeeze(-1)
+        if targets_covered.ndim == valid.ndim + 1:
+            targets_covered = targets_covered[..., 0]
+        valid_targets = targets_covered * valid
+        episode_targets_covered = valid_targets.max(dim=1).values
+        metrics.update(stats("targets_covered", episode_targets_covered))
+
+    if has_key(rollout, (*info_prefix, "collision_rew")):
+        collision_penalty = rollout[(*info_prefix, "collision_rew")]
+        if (
+            collision_penalty.ndim > valid.ndim + 1
+            and collision_penalty.shape[-1] == 1
+        ):
+            collision_penalty = collision_penalty.squeeze(-1)
+        episode_collision_penalty = (
+            collision_penalty * valid.unsqueeze(-1)
+        ).sum(dim=1).mean(dim=-1)
+        metrics.update(stats("collision_penalty", episode_collision_penalty))
+
+    if has_key(rollout, (*info_prefix, "mean_aoi")):
+        mean_aoi = rollout[(*info_prefix, "mean_aoi")].squeeze(-1)
+        metrics["mean_aoi"] = masked_mean(mean_aoi, valid)
+
+    if has_key(rollout, (*info_prefix, "mean_comm_mask")):
+        mean_comm_mask = rollout[(*info_prefix, "mean_comm_mask")].squeeze(-1)
+        metrics["mean_comm_mask"] = masked_mean(mean_comm_mask, valid)
+
+    return metrics
+
+
 def filter_metrics(
     task_name: str,
     summary: dict[str, float],
@@ -318,7 +374,15 @@ def filter_metrics(
             "collision_penalty": ("collision_penalty_",),
             "collision_count": ("pair_collision_count_",),
             "communication": ("mean_aoi", "mean_comm_mask"),
-        }
+        },
+        "comm_discovery": {
+            "reward": ("episode_return_", "team_return_mean"),
+            "success_rate": ("success_rate", "timeout_rate"),
+            "episode_len": ("episode_len_",),
+            "coverage": ("targets_covered_",),
+            "collision_penalty": ("collision_penalty_",),
+            "communication": ("mean_aoi", "mean_comm_mask"),
+        },
     }
     task_groups = group_keys.get(task_name, {})
     selected = {"episodes"}

@@ -16,6 +16,9 @@ from torchrl.envs import EnvBase
 from benchmarl.environments.common import Task
 from benchmarl.utils import DEVICE_TYPING
 
+from comm_limited_vmas.scenarios.comm_discovery import (
+    Scenario as CommDiscoveryScenario,
+)
 from comm_limited_vmas.scenarios.comm_navigation import (
     Scenario as CommNavigationScenario,
 )
@@ -29,8 +32,8 @@ class CommLimitedVmasTask(Task):
     # Python Enum 中多个相同值会变成 alias。
     COMM_NAVIGATION = "comm_navigation"
     COMM_SPREAD = "comm_spread"
+    COMM_DISCOVERY = "comm_discovery"
     # 后面可以继续加：
-    # COMM_DISCOVERY = "comm_discovery"
     # COMM_DISPERSION = "comm_dispersion"
     # COMM_FLOCKING = "comm_flocking"
 
@@ -53,6 +56,8 @@ class CommLimitedVmasTask(Task):
             scenario_cls = CommNavigationScenario
         elif self.name == "COMM_SPREAD":
             scenario_cls = CommSpreadScenario
+        elif self.name == "COMM_DISCOVERY":
+            scenario_cls = CommDiscoveryScenario
         else:
             raise ValueError(f"Unknown task: {self.name}")
 
@@ -143,6 +148,7 @@ def build_comm_vmas_task(
     task_map = {
         "comm_navigation": CommLimitedVmasTask.COMM_NAVIGATION,
         "comm_spread": CommLimitedVmasTask.COMM_SPREAD,
+        "comm_discovery": CommLimitedVmasTask.COMM_DISCOVERY,
     }
 
     if task_name not in task_map:

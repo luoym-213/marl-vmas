@@ -1,0 +1,11 @@
+episodes: 100
+max_steps: 100
+deterministic: true
+device: cpu
+output_dir: outputs/eval
+metrics:
+  - reward
+  - episode_len
+  - coverage
+  - collision_penalty
+  - communication

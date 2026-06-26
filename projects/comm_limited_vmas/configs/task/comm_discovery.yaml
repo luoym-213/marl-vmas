@@ -1,0 +1,13 @@
+scenario: comm_discovery
+n_agents: 5
+n_targets: 7
+continuous_actions: true
+max_steps: 100
+lidar_range: 0.35
+covering_range: 0.25
+agents_per_target: 2
+targets_respawn: true
+shared_reward: true
+use_agent_lidar: false
+n_lidar_rays_entities: 15
+n_lidar_rays_agents: 12
