@@ -32,3 +32,5 @@ projects/comm_limited_vmas/**/videos/
 *.log
 
 .DS_Store
+
+*.sh
