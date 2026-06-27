@@ -46,8 +46,10 @@ class Scenario(BaseScenario):
         self.w_goal = float(kwargs.pop("w_goal", 1.0))
         self.w_leader = float(kwargs.pop("w_leader", 0.5))
         self.w_follow = float(kwargs.pop("w_follow", 0.3))
-        self.w_time = float(kwargs.pop("w_time", 0.01))
+        self.w_time = float(kwargs.pop("w_time", 0.0))
         self.w_progress = float(kwargs.pop("w_progress", 2.0))
+        self.w_leader_progress = float(kwargs.pop("w_leader_progress", 0.0))
+        self.w_follow_progress = float(kwargs.pop("w_follow_progress", 0.0))
         self.success_reward = float(kwargs.pop("success_reward", 5.0))
         self.epsilon_goal = float(kwargs.pop("epsilon_goal", 0.12))
         self.d_follow = float(kwargs.pop("d_follow", 0.0))
@@ -89,6 +91,8 @@ class Scenario(BaseScenario):
         self.target = target
 
         self.prev_team_distance = torch.zeros(batch_dim, device=device)
+        self.prev_leader_distance = torch.zeros(batch_dim, device=device)
+        self.prev_follow_error = torch.zeros(batch_dim, device=device)
         self.team_reward = torch.zeros(batch_dim, device=device)
 
         self.comm_manager = CommunicationManager(
@@ -124,12 +128,23 @@ class Scenario(BaseScenario):
             agent_pos - target_pos.unsqueeze(1),
             dim=-1,
         ).mean(dim=-1)
+        reset_leader_distance = torch.linalg.vector_norm(
+            agent_pos[:, 0] - target_pos,
+            dim=-1,
+        )
+        reset_follow_error = self._follow_error_from_positions(agent_pos)
         if env_index is None:
             self.prev_team_distance.copy_(reset_team_distance)
+            self.prev_leader_distance.copy_(reset_leader_distance)
+            self.prev_follow_error.copy_(reset_follow_error)
         else:
             if reset_team_distance.numel() == 1:
                 reset_team_distance = reset_team_distance.squeeze(0)
+                reset_leader_distance = reset_leader_distance.squeeze(0)
+                reset_follow_error = reset_follow_error.squeeze(0)
             self.prev_team_distance[env_index] = reset_team_distance
+            self.prev_leader_distance[env_index] = reset_leader_distance
+            self.prev_follow_error[env_index] = reset_follow_error
             self.team_reward[env_index] = 0.0
 
         self._comm_manager.reset(self._current_agent_states(), env_index)
@@ -208,17 +223,22 @@ class Scenario(BaseScenario):
             leader_distance = self._leader_distance()
             follow_error = self._follow_error()
             success = self._success()
-            progress = self.prev_team_distance - team_distance
+            team_progress = self.prev_team_distance - team_distance
+            leader_progress = self.prev_leader_distance - leader_distance
+            follow_progress = self.prev_follow_error - follow_error
 
             self.team_reward = (
-                self.w_progress * progress
+                self.w_progress * team_progress
+                + self.w_leader_progress * leader_progress
+                + self.w_follow_progress * follow_progress
                 - self.w_goal * team_distance
                 - self.w_leader * leader_distance
                 - self.w_follow * follow_error
-                - self.w_time
                 + self.success_reward * success.float()
             )
             self.prev_team_distance.copy_(team_distance.detach())
+            self.prev_leader_distance.copy_(leader_distance.detach())
+            self.prev_follow_error.copy_(follow_error.detach())
 
         return self.team_reward
 
@@ -239,6 +259,9 @@ class Scenario(BaseScenario):
             "team_distance": self._team_distance().unsqueeze(-1),
             "leader_distance": self._leader_distance().unsqueeze(-1),
             "follow_error": self._follow_error().unsqueeze(-1),
+            "team_progress": self._team_progress().unsqueeze(-1),
+            "leader_progress": self._leader_progress().unsqueeze(-1),
+            "follow_progress": self._follow_progress().unsqueeze(-1),
             "all_goals_reached": self._success().float().unsqueeze(-1),
         }
 
@@ -311,13 +334,24 @@ class Scenario(BaseScenario):
         return self._agent_target_distances()[:, 0]
 
     def _follow_error(self) -> Tensor:
-        positions = self._current_agent_positions()
+        return self._follow_error_from_positions(self._current_agent_positions())
+
+    def _follow_error_from_positions(self, positions: Tensor) -> Tensor:
         leader_pos = positions[:, 0]
         follower_distances = torch.linalg.vector_norm(
             positions[:, 1:] - leader_pos.unsqueeze(1),
             dim=-1,
         )
         return torch.abs(follower_distances - self.d_follow).sum(dim=-1)
+
+    def _team_progress(self) -> Tensor:
+        return self.prev_team_distance - self._team_distance()
+
+    def _leader_progress(self) -> Tensor:
+        return self.prev_leader_distance - self._leader_distance()
+
+    def _follow_progress(self) -> Tensor:
+        return self.prev_follow_error - self._follow_error()
 
     def _success(self) -> Tensor:
         return (self._agent_target_distances() <= self.epsilon_goal).all(dim=-1)

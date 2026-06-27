@@ -371,6 +371,9 @@ def trace_row(step: int, td, native_env: Any) -> dict[str, Any]:
         "team_distance": float(info["team_distance"][0, 0, 0].item()),
         "leader_distance": float(info["leader_distance"][0, 0, 0].item()),
         "follow_error": float(info["follow_error"][0, 0, 0].item()),
+        "team_progress": float(info["team_progress"][0, 0, 0].item()),
+        "leader_progress": float(info["leader_progress"][0, 0, 0].item()),
+        "follow_progress": float(info["follow_progress"][0, 0, 0].item()),
         "mean_aoi": float(info["mean_aoi"].mean().item()),
         "mean_comm_mask": float(info["mean_comm_mask"].mean().item()),
     }
@@ -407,6 +410,9 @@ def final_metrics(td) -> dict[str, float | bool]:
         "team_distance": float(info["team_distance"][0, 0, 0].item()),
         "leader_distance": float(info["leader_distance"][0, 0, 0].item()),
         "follow_error": float(info["follow_error"][0, 0, 0].item()),
+        "team_progress": float(info["team_progress"][0, 0, 0].item()),
+        "leader_progress": float(info["leader_progress"][0, 0, 0].item()),
+        "follow_progress": float(info["follow_progress"][0, 0, 0].item()),
         "mean_aoi": float(info["mean_aoi"].mean().item()),
         "mean_comm_mask": float(info["mean_comm_mask"].mean().item()),
     }

@@ -15,9 +15,11 @@ min_leader_target_dist: 0.7
 w_goal: 1.0
 w_leader: 0.5
 w_follow: 0.3
-w_time: 0.01
-w_progress: 2.0
-success_reward: 5.0
+w_time: 0.0
+w_progress: 5.0
+w_leader_progress: 2.0
+w_follow_progress: 1.0
+success_reward: 20.0
 epsilon_goal: 0.12
 d_follow: 0.0
 aoi_normalizer: 100.0
