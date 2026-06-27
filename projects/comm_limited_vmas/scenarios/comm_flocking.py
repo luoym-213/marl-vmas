@@ -34,6 +34,8 @@ class Scenario(VmasFlockingScenario):
             num_envs=batch_dim,
             n_agents=len(world.policy_agents),
             device=device,
+            estimator_config=self.estimator_config,
+            dt=world.dt,
         )
         return world
 

@@ -36,6 +36,8 @@ class Scenario(VmasSimpleSpreadScenario):
             num_envs=batch_dim,
             n_agents=len(world.agents),
             device=device,
+            estimator_config=self.estimator_config,
+            dt=world.dt,
         )
         return world
 

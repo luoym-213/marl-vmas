@@ -10,6 +10,7 @@ from torch import Tensor
 from comm_limited_vmas.communication.cache import AgentStateCache
 from comm_limited_vmas.communication.channel import CommunicationChannel
 from comm_limited_vmas.communication.delay_buffer import TensorDelayBuffer
+from comm_limited_vmas.estimators import build_estimator
 
 
 class CommunicationManager:
@@ -22,14 +23,23 @@ class CommunicationManager:
         n_agents: int,
         device: torch.device,
         state_dim: int = 4,
+        estimator_config: dict[str, Any] | None = None,
+        dt: float = 0.1,
     ):
         self.channel = CommunicationChannel(config)
         self.num_envs = num_envs
         self.n_agents = n_agents
         self.device = device
         self.state_dim = state_dim
+        self.dt = float(dt)
         self.current_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.cache = AgentStateCache(num_envs, n_agents, state_dim, device)
+        self.estimator = build_estimator(
+            estimator_config,
+            state_dim=state_dim,
+            device=device,
+            dt=self.dt,
+        )
         self.delay_buffer = (
             TensorDelayBuffer(
                 max_delay=self.channel.max_delay,
@@ -116,10 +126,21 @@ class CommunicationManager:
         self.cache.update_self(states, self.current_steps)
 
     def get_state(self, receiver: int, sender: int) -> Tensor:
-        return self.cache.get_state(receiver, sender)
+        cached_state = self.cache.get_state(receiver, sender)
+        aoi_steps = self.cache.get_aoi(receiver, self.current_steps)[:, sender]
+        return self.estimator.estimate_state(cached_state, aoi_steps)
 
     def get_receiver_states(self, receiver: int) -> Tensor:
         return self.cache.get_receiver_states(receiver)
+
+    def get_estimated_receiver_states(self, receiver: int) -> Tensor:
+        cached_states = self.cache.get_receiver_states(receiver)
+        aoi_steps = self.cache.get_aoi(receiver, self.current_steps)
+        return self.estimator.estimate_state(cached_states, aoi_steps)
+
+    def get_estimator_covariance_diag(self, receiver: int) -> Tensor:
+        aoi_steps = self.cache.get_aoi(receiver, self.current_steps)
+        return self.estimator.covariance_diag(aoi_steps)
 
     def get_aoi(self, receiver: int) -> Tensor:
         return self.cache.get_aoi(receiver, self.current_steps)

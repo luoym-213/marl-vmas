@@ -68,7 +68,7 @@ def main() -> None:
         / "outputs"
         / "diagnostics"
         / "comm_hidden_goal_navigation"
-        / f"{args.comm}_seed{args.seed}"
+        / f"{args.comm}_{args.estimator}_seed{args.seed}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +96,8 @@ def main() -> None:
             output_dir=output_dir,
             comm_name=args.comm,
             comm_config=comm_config,
+            estimator_name=args.estimator,
+            estimator_config=estimator_config,
             task_config=task_config,
             max_steps=max_steps,
             gain=args.gain,
@@ -116,6 +118,8 @@ def run_diagnostic_episode(
     output_dir: Path,
     comm_name: str,
     comm_config: dict[str, Any],
+    estimator_name: str,
+    estimator_config: dict[str, Any],
     task_config: dict[str, Any],
     max_steps: int,
     gain: float,
@@ -133,7 +137,8 @@ def run_diagnostic_episode(
     trace_rows = [trace_row(step=0, td=td, native_env=native_env)]
 
     checks = validate_initial_state(initial_td, native_env, task_config)
-    observations = observation_report(initial_td, task_config)
+    checks.extend(validate_estimator_state(initial_td, native_env, "initial"))
+    observations = observation_report(initial_td, native_env, task_config)
 
     done = bool(td["done"][0].item())
     success = bool(
@@ -160,6 +165,8 @@ def run_diagnostic_episode(
         if done:
             break
 
+    checks.extend(validate_estimator_state(td, native_env, "final"))
+
     gif_path = output_dir / "episode.gif"
     imageio.mimsave(gif_path, frames, fps=fps)
 
@@ -173,6 +180,8 @@ def run_diagnostic_episode(
         "task": "comm_hidden_goal_navigation",
         "comm": comm_name,
         "comm_config": comm_config,
+        "estimator": estimator_name,
+        "estimator_config": estimator_config,
         "max_steps": max_steps,
         "steps_recorded": len(trace_rows) - 1,
         "done": done,
@@ -261,18 +270,19 @@ def validate_initial_state(
         all(not agent.collide for agent in world.agents),
     )
 
-    cached_state = info["cached_state"]
+    comm_manager = native_env.scenario._comm_manager
     aoi = info["aoi"]
     comm_mask = info["comm_mask"]
     aoi_normalizer = float(task_config["aoi_normalizer"])
     for ego_index in range(N_AGENTS):
+        estimated_state = comm_manager.get_estimated_receiver_states(ego_index)
         for block_index, teammate_index in enumerate(teammate_order(ego_index)):
             block = teammate_block(obs[0, ego_index], block_index)
-            cached = cached_state[0, ego_index, teammate_index]
+            estimated = estimated_state[0, teammate_index]
             expected = torch.cat(
                 [
-                    cached[:2] - obs[0, ego_index, :2],
-                    cached[2:] - obs[0, ego_index, 2:4],
+                    estimated[:2] - obs[0, ego_index, :2],
+                    estimated[2:] - obs[0, ego_index, 2:4],
                     torch.tensor(
                         [
                             min(float(aoi[0, ego_index, teammate_index].item()) / aoi_normalizer, 1.0),
@@ -307,12 +317,87 @@ def validate_initial_state(
     return checks
 
 
-def observation_report(td, task_config: dict[str, Any]) -> dict[str, Any]:
+def validate_estimator_state(td, native_env: Any, prefix: str) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    scenario = native_env.scenario
+    comm_manager = scenario._comm_manager
+
+    for ego_index in range(N_AGENTS):
+        raw_states = comm_manager.get_receiver_states(ego_index)
+        estimated_states = comm_manager.get_estimated_receiver_states(ego_index)
+        cov_diag = comm_manager.get_estimator_covariance_diag(ego_index)
+        aoi = comm_manager.get_aoi(ego_index)
+
+        expected = raw_states.clone()
+        max_steps = getattr(comm_manager.estimator, "max_extrapolation_steps", None)
+        extrapolation_steps = aoi.float()
+        if max_steps is not None:
+            extrapolation_steps = extrapolation_steps.clamp(max=float(max_steps))
+        delta_t = extrapolation_steps * float(comm_manager.dt)
+        expected[..., :2] = (
+            raw_states[..., :2] + raw_states[..., 2:] * delta_t.unsqueeze(-1)
+        )
+
+        estimator_name = comm_manager.estimator.__class__.__name__
+        if estimator_name == "StaleEstimator":
+            expected = raw_states
+
+        add_check(
+            checks,
+            f"{prefix}_estimated_state_formula_ego{ego_index}",
+            torch.allclose(estimated_states, expected, atol=1e-5),
+        )
+        zero_aoi = aoi == 0
+        if zero_aoi.any():
+            add_check(
+                checks,
+                f"{prefix}_zero_aoi_matches_raw_ego{ego_index}",
+                torch.allclose(
+                    estimated_states[zero_aoi],
+                    raw_states[zero_aoi],
+                    atol=1e-5,
+                ),
+            )
+
+        add_check(
+            checks,
+            f"{prefix}_covariance_diag_finite_ego{ego_index}",
+            bool(torch.isfinite(cov_diag).all().item()),
+        )
+        add_check(
+            checks,
+            f"{prefix}_covariance_diag_nonnegative_ego{ego_index}",
+            bool((cov_diag >= 0).all().item()),
+        )
+        add_check(
+            checks,
+            f"{prefix}_covariance_diag_monotonic_by_aoi_ego{ego_index}",
+            covariance_diag_monotonic(aoi, cov_diag),
+        )
+
+    return checks
+
+
+def covariance_diag_monotonic(aoi: Tensor, cov_diag: Tensor) -> bool:
+    flat_aoi = aoi.reshape(-1)
+    flat_cov = cov_diag.reshape(-1, cov_diag.shape[-1])
+    order = torch.argsort(flat_aoi)
+    sorted_cov = flat_cov[order]
+    if sorted_cov.shape[0] <= 1:
+        return True
+    return bool((sorted_cov[1:] + 1e-6 >= sorted_cov[:-1]).all().item())
+
+
+def observation_report(td, native_env: Any, task_config: dict[str, Any]) -> dict[str, Any]:
     obs = td[("agents", "observation")][0]
     info = td[("agents", "info")]
+    comm_manager = native_env.scenario._comm_manager
     aoi_normalizer = float(task_config["aoi_normalizer"])
     report: dict[str, Any] = {}
     for ego_index in range(N_AGENTS):
+        raw_cached_state = comm_manager.get_receiver_states(ego_index)[0]
+        estimated_state = comm_manager.get_estimated_receiver_states(ego_index)[0]
+        cov_diag = comm_manager.get_estimator_covariance_diag(ego_index)[0]
         agent_report = {
             "raw": tensor_to_list(obs[ego_index]),
             "self": {
@@ -329,16 +414,23 @@ def observation_report(td, task_config: dict[str, Any]) -> dict[str, Any]:
                 "aoi": tensor_to_list(info["aoi"][0, ego_index]),
                 "comm_mask": tensor_to_list(info["comm_mask"][0, ego_index]),
                 "cached_state": tensor_to_list(info["cached_state"][0, ego_index]),
+                "estimated_state": tensor_to_list(estimated_state),
+                "estimator_covariance_diag": tensor_to_list(cov_diag),
             },
         }
         for block_index, teammate_index in enumerate(teammate_order(ego_index)):
             block = teammate_block(obs[ego_index], block_index)
             raw_aoi = float(info["aoi"][0, ego_index, teammate_index].item())
+            delta_t = raw_aoi * float(comm_manager.dt)
             agent_report["teammates"].append(
                 {
                     "agent_index": teammate_index,
-                    "relative_cached_pos": tensor_to_list(block[0:2]),
-                    "relative_cached_vel": tensor_to_list(block[2:4]),
+                    "relative_estimated_pos": tensor_to_list(block[0:2]),
+                    "relative_estimated_vel": tensor_to_list(block[2:4]),
+                    "raw_cached_state": tensor_to_list(raw_cached_state[teammate_index]),
+                    "estimated_state": tensor_to_list(estimated_state[teammate_index]),
+                    "delta_t": delta_t,
+                    "estimator_covariance_diag": tensor_to_list(cov_diag[teammate_index]),
                     "raw_aoi": raw_aoi,
                     "normalized_aoi": float(block[4].item()),
                     "expected_normalized_aoi": min(raw_aoi / aoi_normalizer, 1.0),

@@ -1,0 +1,5 @@
+name: kinematic
+sigma_p: 0.01
+sigma_v: 0.01
+process_noise_q: 1.0
+max_extrapolation_steps: 15
