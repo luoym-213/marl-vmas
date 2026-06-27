@@ -369,6 +369,7 @@ def _render_fps(native_env: Any, fps: int | None) -> int:
 def summarize_rollout(task_name: str, rollout, max_steps: int) -> dict[str, float]:
     summarizers: dict[str, Callable[[Any, int], dict[str, float]]] = {
         "comm_navigation": summarize_comm_navigation,
+        "comm_hidden_goal_navigation": summarize_comm_hidden_goal_navigation,
         "comm_discovery": summarize_comm_discovery,
         "comm_dispersion": summarize_comm_dispersion,
         "comm_flocking": summarize_comm_flocking,
@@ -415,6 +416,81 @@ def summarize_comm_navigation(rollout, max_steps: int) -> dict[str, float]:
         agent0_pair_count = pair_count[..., 0]
         episode_pair_count = (agent0_pair_count * valid).sum(dim=1)
         metrics.update(stats("pair_collision_count", episode_pair_count))
+
+    if has_key(rollout, (*info_prefix, "mean_aoi")):
+        mean_aoi = rollout[(*info_prefix, "mean_aoi")].squeeze(-1)
+        metrics["mean_aoi"] = masked_mean(mean_aoi, valid)
+
+    if has_key(rollout, (*info_prefix, "mean_comm_mask")):
+        mean_comm_mask = rollout[(*info_prefix, "mean_comm_mask")].squeeze(-1)
+        metrics["mean_comm_mask"] = masked_mean(mean_comm_mask, valid)
+
+    return metrics
+
+
+def summarize_comm_hidden_goal_navigation(
+    rollout,
+    max_steps: int,
+) -> dict[str, float]:
+    done = rollout["next", "done"].squeeze(-1).bool()
+    episode_len = first_done_lengths(done, max_steps)
+    valid = valid_step_mask(episode_len, done.shape[1])
+    info_prefix = ("next", "agents", "info")
+
+    if has_key(rollout, (*info_prefix, "all_goals_reached")):
+        reached = rollout[(*info_prefix, "all_goals_reached")].squeeze(-1)
+        success = reached[..., 0].bool().any(dim=1)
+    else:
+        success = done.any(dim=1)
+
+    reward = rollout["next", "agents", "reward"].squeeze(-1)
+    valid_reward = reward * valid.unsqueeze(-1)
+    per_agent_return = valid_reward.sum(dim=1)
+    episode_return = per_agent_return.mean(dim=-1)
+    team_return = per_agent_return.sum(dim=-1)
+
+    metrics = {
+        "episodes": float(done.shape[0]),
+        "success_rate": tensor_mean(success.float()),
+        "timeout_rate": tensor_mean((~success).float()),
+        **stats("episode_len", episode_len.float()),
+        **stats("episode_return", episode_return),
+        "team_return_mean": tensor_mean(team_return),
+    }
+
+    if success.any():
+        metrics.update(stats("success_episode_len", episode_len[success].float()))
+    else:
+        metrics.update(
+            {
+                "success_episode_len_mean": float("nan"),
+                "success_episode_len_std": float("nan"),
+                "success_episode_len_min": float("nan"),
+                "success_episode_len_max": float("nan"),
+            }
+        )
+
+    if has_key(rollout, (*info_prefix, "team_distance")):
+        team_distance = rollout[(*info_prefix, "team_distance")].squeeze(-1)
+        agent0_team_distance = team_distance[..., 0]
+        final_index = (episode_len - 1).clamp_min(0)
+        final_team_distance = agent0_team_distance[
+            torch.arange(agent0_team_distance.shape[0], device=final_index.device),
+            final_index,
+        ]
+        metrics.update(stats("final_team_distance", final_team_distance))
+        metrics["mean_team_distance"] = masked_mean(agent0_team_distance, valid)
+
+    if has_key(rollout, (*info_prefix, "leader_distance")):
+        leader_distance = rollout[(*info_prefix, "leader_distance")].squeeze(-1)
+        metrics["mean_leader_distance"] = masked_mean(
+            leader_distance[..., 0],
+            valid,
+        )
+
+    if has_key(rollout, (*info_prefix, "follow_error")):
+        follow_error = rollout[(*info_prefix, "follow_error")].squeeze(-1)
+        metrics["mean_follow_error"] = masked_mean(follow_error[..., 0], valid)
 
     if has_key(rollout, (*info_prefix, "mean_aoi")):
         mean_aoi = rollout[(*info_prefix, "mean_aoi")].squeeze(-1)
@@ -583,6 +659,18 @@ def filter_metrics(
             "episode_len": ("episode_len_",),
             "collision_penalty": ("collision_penalty_",),
             "collision_count": ("pair_collision_count_",),
+            "communication": ("mean_aoi", "mean_comm_mask"),
+        },
+        "comm_hidden_goal_navigation": {
+            "reward": ("episode_return_", "team_return_mean"),
+            "success_rate": ("success_rate", "timeout_rate"),
+            "episode_len": ("episode_len_", "success_episode_len_"),
+            "distance": (
+                "final_team_distance_",
+                "mean_team_distance",
+                "mean_leader_distance",
+                "mean_follow_error",
+            ),
             "communication": ("mean_aoi", "mean_comm_mask"),
         },
         "comm_discovery": {

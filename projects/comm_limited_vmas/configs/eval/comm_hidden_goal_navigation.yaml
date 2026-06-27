@@ -1,0 +1,11 @@
+episodes: 100
+max_steps: 100
+deterministic: true
+device: cpu
+output_dir: outputs/eval
+metrics:
+  - reward
+  - success_rate
+  - episode_len
+  - distance
+  - communication

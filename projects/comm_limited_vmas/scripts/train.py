@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,14 @@ from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
 
-from comm_limited_vmas.benchmarl_task import build_comm_vmas_task
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_PARENT = PROJECT_ROOT.parent
+if str(PROJECT_PARENT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_PARENT))
+
 CONFIG_ROOT = PROJECT_ROOT / "configs"
+
+from comm_limited_vmas.benchmarl_task import build_comm_vmas_task
 
 
 ALGORITHM_REGISTRY = {
