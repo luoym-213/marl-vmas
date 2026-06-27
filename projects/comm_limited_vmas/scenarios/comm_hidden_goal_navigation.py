@@ -120,11 +120,16 @@ class Scenario(BaseScenario):
         self.target.set_pos(target_pos, batch_index=env_index)
         self.target.set_vel(zero_vel, batch_index=env_index)
 
-        team_distance = self._team_distance()
+        reset_team_distance = torch.linalg.vector_norm(
+            agent_pos - target_pos.unsqueeze(1),
+            dim=-1,
+        ).mean(dim=-1)
         if env_index is None:
-            self.prev_team_distance.copy_(team_distance)
+            self.prev_team_distance.copy_(reset_team_distance)
         else:
-            self.prev_team_distance[env_index] = team_distance.squeeze(0)
+            if reset_team_distance.numel() == 1:
+                reset_team_distance = reset_team_distance.squeeze(0)
+            self.prev_team_distance[env_index] = reset_team_distance
             self.team_reward[env_index] = 0.0
 
         self._comm_manager.reset(self._current_agent_states(), env_index)

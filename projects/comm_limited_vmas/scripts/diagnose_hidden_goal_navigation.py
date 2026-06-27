@@ -133,7 +133,7 @@ def run_diagnostic_episode(
     trace_rows = [trace_row(step=0, td=td, native_env=native_env)]
 
     checks = validate_initial_state(initial_td, native_env, task_config)
-    observations = observation_report(initial_td)
+    observations = observation_report(initial_td, task_config)
 
     done = bool(td["done"][0].item())
     success = bool(
@@ -289,13 +289,28 @@ def validate_initial_state(
                 f"teammate_block_ego{ego_index}_sender{teammate_index}",
                 torch.allclose(block, expected, atol=1e-5),
             )
+            add_check(
+                checks,
+                f"normalized_aoi_range_ego{ego_index}_sender{teammate_index}",
+                bool((0.0 <= block[4].item()) and (block[4].item() <= 1.0)),
+            )
+            expected_normalized_aoi = min(
+                float(aoi[0, ego_index, teammate_index].item()) / aoi_normalizer,
+                1.0,
+            )
+            add_check(
+                checks,
+                f"normalized_aoi_value_ego{ego_index}_sender{teammate_index}",
+                abs(float(block[4].item()) - expected_normalized_aoi) <= 1e-5,
+            )
 
     return checks
 
 
-def observation_report(td) -> dict[str, Any]:
+def observation_report(td, task_config: dict[str, Any]) -> dict[str, Any]:
     obs = td[("agents", "observation")][0]
     info = td[("agents", "info")]
+    aoi_normalizer = float(task_config["aoi_normalizer"])
     report: dict[str, Any] = {}
     for ego_index in range(N_AGENTS):
         agent_report = {
@@ -318,12 +333,15 @@ def observation_report(td) -> dict[str, Any]:
         }
         for block_index, teammate_index in enumerate(teammate_order(ego_index)):
             block = teammate_block(obs[ego_index], block_index)
+            raw_aoi = float(info["aoi"][0, ego_index, teammate_index].item())
             agent_report["teammates"].append(
                 {
                     "agent_index": teammate_index,
                     "relative_cached_pos": tensor_to_list(block[0:2]),
                     "relative_cached_vel": tensor_to_list(block[2:4]),
+                    "raw_aoi": raw_aoi,
                     "normalized_aoi": float(block[4].item()),
+                    "expected_normalized_aoi": min(raw_aoi / aoi_normalizer, 1.0),
                     "fresh_comm_mask": float(block[5].item()),
                     "role": tensor_to_list(block[6:8]),
                 }
