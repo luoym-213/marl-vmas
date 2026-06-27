@@ -1,0 +1,7 @@
+mode: delay
+comm_radius: null
+dropout_prob: 0.3
+delay:
+  type: geometric
+  mean: 8
+  max: 30

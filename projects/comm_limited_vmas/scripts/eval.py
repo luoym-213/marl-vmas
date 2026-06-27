@@ -15,7 +15,7 @@ from benchmarl.algorithms import IppoConfig, MappoConfig
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
 from torch import Tensor
-from torchrl.envs.utils import ExplorationType, set_exploration_type
+from torchrl.envs.utils import ExplorationType, set_exploration_type, step_mdp
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +62,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use deterministic actions. Defaults to eval config.",
     )
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="Render policy rollouts as GIF files in the eval output directory.",
+    )
+    parser.add_argument(
+        "--render-episodes",
+        type=int,
+        default=1,
+        help="Number of vectorized eval episodes to save as GIFs.",
+    )
+    parser.add_argument(
+        "--render-fps",
+        type=int,
+        default=None,
+        help="FPS for rendered GIFs. Defaults to round(1 / env._env.world.dt).",
+    )
     return parser.parse_args()
 
 
@@ -103,22 +120,6 @@ def main() -> None:
         seed=args.seed,
     )
 
-    try:
-        load_checkpoint_weights(experiment, checkpoint, device)
-        rollout = run_rollout(
-            experiment=experiment,
-            max_steps=max_steps,
-            deterministic=deterministic,
-        )
-        summary = summarize_rollout(args.task, rollout, max_steps)
-        summary = filter_metrics(
-            task_name=args.task,
-            summary=summary,
-            metric_groups=eval_config.get("metrics"),
-        )
-    finally:
-        experiment.close()
-
     metadata = {
         "task": args.task,
         "algorithm": args.algorithm,
@@ -132,10 +133,38 @@ def main() -> None:
         "seed": args.seed,
         "deterministic": deterministic,
     }
-    result = {"metadata": metadata, "metrics": summary}
     output_dir = make_output_dir(output_root, metadata, checkpoint)
-    write_outputs(output_dir, result)
-    print_summary(result, output_dir)
+
+    try:
+        load_checkpoint_weights(experiment, checkpoint, device)
+        rollout = run_rollout(
+            experiment=experiment,
+            max_steps=max_steps,
+            deterministic=deterministic,
+        )
+        summary = summarize_rollout(args.task, rollout, max_steps)
+        summary = filter_metrics(
+            task_name=args.task,
+            summary=summary,
+            metric_groups=eval_config.get("metrics"),
+        )
+
+        if args.render_gif:
+            render_gif_paths = render_policy_gifs(
+                experiment=experiment,
+                max_steps=max_steps,
+                deterministic=deterministic,
+                output_dir=output_dir,
+                render_episodes=args.render_episodes,
+                fps=args.render_fps,
+            )
+            metadata["render_gif_paths"] = [str(path) for path in render_gif_paths]
+
+        result = {"metadata": metadata, "metrics": summary}
+        write_outputs(output_dir, result)
+        print_summary(result, output_dir)
+    finally:
+        experiment.close()
 
 
 def load_yaml(group: str, name: str) -> dict[str, Any]:
@@ -242,6 +271,99 @@ def run_rollout(
             auto_cast_to_device=True,
             break_when_any_done=False,
         )
+
+
+def render_policy_gifs(
+    experiment: Experiment,
+    max_steps: int,
+    deterministic: bool,
+    output_dir: Path,
+    render_episodes: int,
+    fps: int | None,
+) -> list[Path]:
+    if render_episodes <= 0:
+        return []
+
+    import imageio.v2 as imageio
+
+    env = experiment.test_env
+    native_env = getattr(env, "_env", None)
+    if native_env is None or not hasattr(native_env, "render"):
+        raise RuntimeError("The test env does not expose a renderable VMAS _env")
+
+    num_envs = _num_envs(env)
+    num_render = min(render_episodes, num_envs)
+    if num_render < render_episodes:
+        print(
+            f"[Warning] render_episodes={render_episodes} exceeds eval "
+            f"num_envs={num_envs}; rendering {num_render} episode(s)."
+        )
+
+    gif_fps = _render_fps(native_env, fps)
+    frames: list[list[Any]] = [[] for _ in range(num_render)]
+    finished = torch.zeros(num_render, dtype=torch.bool)
+    exploration_type = (
+        ExplorationType.DETERMINISTIC if deterministic else ExplorationType.RANDOM
+    )
+
+    td = env.reset()
+    _append_render_frames(native_env, frames, finished)
+
+    with torch.no_grad(), set_exploration_type(exploration_type):
+        for _ in range(max_steps):
+            td = experiment.policy(td)
+            step_td = env.step(td)
+            done = step_td["next", "done"].squeeze(-1)[:num_render].detach().cpu()
+
+            _append_render_frames(native_env, frames, finished)
+            finished |= done.bool()
+            if finished.all():
+                break
+
+            td = step_mdp(step_td)
+
+    gif_paths = []
+    for episode_index, episode_frames in enumerate(frames):
+        if not episode_frames:
+            continue
+        gif_path = output_dir / f"render_episode_{episode_index:03d}.gif"
+        imageio.mimsave(gif_path, episode_frames, fps=gif_fps)
+        gif_paths.append(gif_path)
+
+    return gif_paths
+
+
+def _append_render_frames(
+    native_env: Any,
+    frames: list[list[Any]],
+    finished: Tensor,
+) -> None:
+    for env_index, episode_frames in enumerate(frames):
+        if not bool(finished[env_index]):
+            episode_frames.append(
+                native_env.render(mode="rgb_array", env_index=env_index)
+            )
+
+
+def _num_envs(env: Any) -> int:
+    if len(env.batch_size) > 0:
+        return int(env.batch_size[0])
+    native_env = getattr(env, "_env", None)
+    if native_env is not None and hasattr(native_env, "num_envs"):
+        return int(native_env.num_envs)
+    return 1
+
+
+def _render_fps(native_env: Any, fps: int | None) -> int:
+    if fps is not None:
+        if fps <= 0:
+            raise ValueError(f"render_fps must be > 0, got {fps}")
+        return fps
+
+    dt = getattr(getattr(native_env, "world", None), "dt", None)
+    if dt is None:
+        return 10
+    return max(1, round(1 / float(dt)))
 
 
 def summarize_rollout(task_name: str, rollout, max_steps: int) -> dict[str, float]:
@@ -603,6 +725,8 @@ def print_summary(result: dict[str, Any], output_dir: Path) -> None:
             print(f"  {key}: {value:.6g}")
         else:
             print(f"  {key}: {value}")
+    for gif_path in metadata.get("render_gif_paths", []):
+        print(f"Wrote: {gif_path}")
     print(f"Wrote: {output_dir / 'eval_summary.json'}")
     print(f"Wrote: {output_dir / 'eval_summary.csv'}")
 

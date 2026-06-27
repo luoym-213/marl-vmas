@@ -5,6 +5,7 @@ device: cpu
 output_dir: outputs/eval
 metrics:
   - reward
+  - success_rate
   - episode_len
   - coverage
   - collision_penalty
