@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 from benchmarl.algorithms import IppoConfig, MappoConfig
@@ -27,6 +29,102 @@ ALGORITHM_REGISTRY = {
     "mappo": MappoConfig,
     "ippo": IppoConfig,
 }
+
+
+class FiniteGuardExperiment(Experiment):
+    """BenchMARL experiment with a guard against corrupting params with NaNs."""
+
+    def _optimizer_loop(self, group: str):
+        subdata = self.replay_buffers[group].sample().to(self.config.train_device)
+        loss_vals = self.losses[group](subdata)
+        training_td = loss_vals.detach()
+        loss_vals = self.algorithm.process_loss_vals(group, loss_vals)
+
+        for loss_name, loss_value in loss_vals.items():
+            if loss_name not in self.optimizers[group].keys():
+                continue
+
+            optimizer = self.optimizers[group][loss_name]
+            skipped_key = f"skipped_nonfinite_{loss_name}"
+
+            if not torch.isfinite(loss_value.detach()).all():
+                optimizer.zero_grad()
+                training_td.set(
+                    skipped_key,
+                    torch.ones((), device=self.config.train_device),
+                )
+                training_td.set(
+                    f"grad_norm_{loss_name}",
+                    torch.tensor(float("nan"), device=self.config.train_device),
+                )
+                continue
+
+            loss_value.backward()
+
+            if not self._optimizer_grads_finite(optimizer):
+                optimizer.zero_grad()
+                training_td.set(
+                    skipped_key,
+                    torch.ones((), device=self.config.train_device),
+                )
+                training_td.set(
+                    f"grad_norm_{loss_name}",
+                    torch.tensor(float("nan"), device=self.config.train_device),
+                )
+                continue
+
+            grad_norm = self._grad_clip(optimizer)
+            training_td.set(
+                f"grad_norm_{loss_name}",
+                torch.tensor(grad_norm, device=self.config.train_device),
+            )
+
+            if not math.isfinite(grad_norm):
+                optimizer.zero_grad()
+                training_td.set(
+                    skipped_key,
+                    torch.ones((), device=self.config.train_device),
+                )
+                continue
+
+            optimizer.step()
+
+            if not self._optimizer_params_finite(optimizer):
+                raise FloatingPointError(
+                    f"Non-finite parameters after optimizer step for {loss_name}"
+                )
+
+            optimizer.zero_grad()
+            training_td.set(
+                skipped_key,
+                torch.zeros((), device=self.config.train_device),
+            )
+
+        self.replay_buffers[group].update_tensordict_priority(subdata)
+        if self.target_updaters[group] is not None:
+            self.target_updaters[group].step()
+
+        callback_loss = self._on_train_step(subdata, group)
+        if callback_loss is not None:
+            training_td.update(callback_loss)
+
+        return training_td
+
+    @staticmethod
+    def _optimizer_grads_finite(optimizer: torch.optim.Optimizer) -> bool:
+        for param_group in optimizer.param_groups:
+            for param in param_group["params"]:
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    return False
+        return True
+
+    @staticmethod
+    def _optimizer_params_finite(optimizer: torch.optim.Optimizer) -> bool:
+        for param_group in optimizer.param_groups:
+            for param in param_group["params"]:
+                if not torch.isfinite(param.data).all():
+                    return False
+        return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +206,26 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--clip-grad-val",
+        type=float,
+        default=None,
+        help="Override BenchMARL gradient clipping threshold.",
+    )
+
+    parser.add_argument(
+        "--adam-eps",
+        type=float,
+        default=None,
+        help="Override Adam epsilon.",
+    )
+
+    parser.add_argument(
+        "--disable-finite-guard",
+        action="store_true",
+        help="Disable NaN/Inf loss and gradient guard in the optimizer loop.",
+    )
+
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="Use a small debug training setting.",
@@ -173,6 +291,8 @@ def apply_training_profile(
         experiment_config.render = False
         experiment_config.checkpoint_interval = 0
         experiment_config.checkpoint_at_end = False
+        experiment_config.clip_grad_norm = True
+        experiment_config.clip_grad_val = 1.0
         return
 
     experiment_config.on_policy_collected_frames_per_batch = 60_000
@@ -180,6 +300,8 @@ def apply_training_profile(
     experiment_config.on_policy_n_minibatch_iters = 20
     experiment_config.on_policy_minibatch_size = 4096
     experiment_config.lr = 3e-5
+    experiment_config.clip_grad_norm = True
+    experiment_config.clip_grad_val = 1.0
     experiment_config.evaluation_interval = 120_000
     experiment_config.render = False
     experiment_config.checkpoint_interval = 600_000
@@ -221,6 +343,12 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
     if args.minibatch_size is not None:
         experiment_config.on_policy_minibatch_size = args.minibatch_size
 
+    if args.clip_grad_val is not None:
+        experiment_config.clip_grad_val = args.clip_grad_val
+
+    if args.adam_eps is not None:
+        experiment_config.adam_eps = args.adam_eps
+
     save_folder = (
         PROJECT_ROOT
         / "outputs"
@@ -252,7 +380,17 @@ def main() -> None:
     model_config, critic_model_config = build_model_configs()
     experiment_config = build_experiment_config(args)
 
-    experiment = Experiment(
+    experiment_cls = Experiment if args.disable_finite_guard else FiniteGuardExperiment
+    print(
+        "[TrainConfig] "
+        f"lr={experiment_config.lr} "
+        f"clip_grad_norm={experiment_config.clip_grad_norm} "
+        f"clip_grad_val={experiment_config.clip_grad_val} "
+        f"adam_eps={experiment_config.adam_eps} "
+        f"finite_guard={not args.disable_finite_guard}"
+    )
+
+    experiment = experiment_cls(
         task=task,
         algorithm_config=algorithm_config,
         model_config=model_config,
