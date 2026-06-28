@@ -23,7 +23,12 @@ class StaleEstimator(BaseEstimator):
         self.sigma_p = float(sigma_p)
         self.sigma_v = float(sigma_v)
 
-    def estimate_state(self, cached_state: Tensor, aoi_steps: Tensor) -> Tensor:
+    def estimate_state(
+        self,
+        cached_state: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+    ) -> Tensor:
         return cached_state
 
     def covariance_diag(self, aoi_steps: Tensor) -> Tensor:

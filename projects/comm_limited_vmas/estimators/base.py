@@ -18,7 +18,12 @@ class BaseEstimator(ABC):
         self.device = device
 
     @abstractmethod
-    def estimate_state(self, cached_state: Tensor, aoi_steps: Tensor) -> Tensor:
+    def estimate_state(
+        self,
+        cached_state: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+    ) -> Tensor:
         """Return estimated state with the same shape as cached_state."""
 
     @abstractmethod

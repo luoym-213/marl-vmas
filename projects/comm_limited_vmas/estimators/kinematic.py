@@ -31,7 +31,12 @@ class KinematicEstimator(BaseEstimator):
             None if max_extrapolation_steps is None else int(max_extrapolation_steps)
         )
 
-    def estimate_state(self, cached_state: Tensor, aoi_steps: Tensor) -> Tensor:
+    def estimate_state(
+        self,
+        cached_state: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+    ) -> Tensor:
         delta_t = self._delta_t(aoi_steps, clamp=True).unsqueeze(-1)
         estimated = cached_state.clone()
         estimated[..., :2] = cached_state[..., :2] + cached_state[..., 2:] * delta_t

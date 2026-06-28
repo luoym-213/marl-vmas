@@ -27,6 +27,7 @@ if str(PROJECT_PARENT) not in sys.path:
 CONFIG_ROOT = PROJECT_ROOT / "configs"
 
 from comm_limited_vmas.scenarios.comm_hidden_goal_navigation import Scenario
+from comm_limited_vmas.estimators.kinematic import KinematicEstimator
 
 
 OBS_DIM = 25
@@ -188,6 +189,7 @@ def run_diagnostic_episode(
         "success": success,
         "all_checks_passed": all(check["passed"] for check in checks),
         "checks": checks,
+        "estimator_error": estimator_error_report(native_env),
         "initial_spawn": spawn_report(initial_td, native_env),
         "final_metrics": final_metrics(td),
         "outputs": {
@@ -386,6 +388,55 @@ def covariance_diag_monotonic(aoi: Tensor, cov_diag: Tensor) -> bool:
     if sorted_cov.shape[0] <= 1:
         return True
     return bool((sorted_cov[1:] + 1e-6 >= sorted_cov[:-1]).all().item())
+
+
+def estimator_error_report(native_env: Any) -> dict[str, float]:
+    scenario = native_env.scenario
+    comm_manager = scenario._comm_manager
+    true_states = torch.cat(
+        [
+            stack_agent_positions(native_env.world),
+            torch.stack([agent.state.vel for agent in native_env.world.agents], dim=1),
+        ],
+        dim=-1,
+    )
+    kinematic = getattr(comm_manager.estimator, "kinematic", None)
+    if kinematic is None:
+        kinematic = KinematicEstimator(
+            state_dim=4,
+            device=native_env.world.device,
+            dt=float(native_env.world.dt),
+        )
+
+    stale_errors = []
+    kin_errors = []
+    estimated_errors = []
+    aoi_values = []
+    for receiver in range(N_AGENTS):
+        raw_states = comm_manager.get_receiver_states(receiver)
+        estimated_states = comm_manager.get_estimated_receiver_states(receiver)
+        aoi = comm_manager.get_aoi(receiver)
+        kin_states = kinematic.estimate_state(raw_states, aoi)
+        for sender in range(N_AGENTS):
+            if sender == receiver:
+                continue
+            stale_errors.append(state_mse(raw_states[:, sender], true_states[:, sender]))
+            kin_errors.append(state_mse(kin_states[:, sender], true_states[:, sender]))
+            estimated_errors.append(
+                state_mse(estimated_states[:, sender], true_states[:, sender])
+            )
+            aoi_values.append(aoi[:, sender])
+
+    return {
+        "stale_mse": float(torch.stack(stale_errors).mean().item()),
+        "kinematic_mse": float(torch.stack(kin_errors).mean().item()),
+        "estimated_mse": float(torch.stack(estimated_errors).mean().item()),
+        "mean_aoi": float(torch.cat(aoi_values).float().mean().item()),
+    }
+
+
+def state_mse(pred: Tensor, target: Tensor) -> Tensor:
+    return ((pred - target) ** 2).mean()
 
 
 def observation_report(td, native_env: Any, task_config: dict[str, Any]) -> dict[str, Any]:

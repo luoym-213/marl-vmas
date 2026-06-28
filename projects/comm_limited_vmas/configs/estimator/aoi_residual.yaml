@@ -1,0 +1,10 @@
+name: aoi_residual
+sigma_p: 0.01
+sigma_v: 0.01
+process_noise_q: 1.0
+max_extrapolation_steps: 15
+pe_dim: 8
+hidden_layers: [128, 128]
+u_max: 1.0
+checkpoint_path: outputs/estimators/aoi_residual/radius_delay_mean8_dropout03_seed0/model.pt
+fallback_to_kinematic: false

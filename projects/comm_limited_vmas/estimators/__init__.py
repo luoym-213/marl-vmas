@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from comm_limited_vmas.estimators.base import BaseEstimator
+from comm_limited_vmas.estimators.aoi_residual import (
+    AoiResidualEstimator,
+    AoiResidualNetwork,
+)
 from comm_limited_vmas.estimators.kinematic import KinematicEstimator
 from comm_limited_vmas.estimators.stale import StaleEstimator
 
@@ -24,11 +28,20 @@ def build_estimator(
         return StaleEstimator(state_dim=state_dim, device=device, **config)
     if name == "kinematic":
         return KinematicEstimator(state_dim=state_dim, device=device, dt=dt, **config)
+    if name == "aoi_residual":
+        return AoiResidualEstimator(
+            state_dim=state_dim,
+            device=device,
+            dt=dt,
+            **config,
+        )
 
     raise ValueError(f"Unknown estimator: {name}")
 
 
 __all__ = [
+    "AoiResidualEstimator",
+    "AoiResidualNetwork",
     "BaseEstimator",
     "KinematicEstimator",
     "StaleEstimator",
