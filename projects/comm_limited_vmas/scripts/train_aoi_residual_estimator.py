@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--position-weight", type=float, default=1.0)
     parser.add_argument("--velocity-weight", type=float, default=1.0)
+    parser.add_argument("--loss", choices=["mse", "nll", "nll_mse"], default=None)
+    parser.add_argument(
+        "--covariance-mode",
+        choices=["fixed_kinematic", "learned_diag"],
+        default=None,
+    )
+    parser.add_argument("--min-variance", type=float, default=None)
+    parser.add_argument("--max-variance", type=float, default=None)
+    parser.add_argument("--nll-weight", type=float, default=None)
+    parser.add_argument("--mse-weight", type=float, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser.parse_args()
 
@@ -49,6 +60,7 @@ def main() -> None:
     estimator_config = load_yaml("estimator", args.config)
     dataset = torch.load(args.dataset.expanduser(), map_location="cpu")
     tensors = dataset["tensors"]
+    options = training_options(args, estimator_config, dataset)
     train_indices, val_indices = split_indices(
         n_samples=tensors["cached_state"].shape[0],
         val_fraction=args.val_fraction,
@@ -59,6 +71,7 @@ def main() -> None:
         pe_dim=int(estimator_config.get("pe_dim", 8)),
         hidden_layers=estimator_config.get("hidden_layers", [128, 128]),
         u_max=float(estimator_config.get("u_max", 1.0)),
+        covariance_mode=options.covariance_mode,
     ).to(args.device)
 
     optimizer = torch.optim.AdamW(
@@ -87,7 +100,7 @@ def main() -> None:
         train_losses = []
         for batch in train_loader:
             batch = tuple(item.to(args.device) for item in batch)
-            loss = residual_loss(model, batch, loss_weights)
+            loss = residual_loss(model, batch, loss_weights, options)
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -96,7 +109,9 @@ def main() -> None:
 
         model.eval()
         with torch.no_grad():
-            val_loss = float(residual_loss(model, val_batch, loss_weights).cpu().item())
+            val_loss = float(
+                residual_loss(model, val_batch, loss_weights, options).cpu().item()
+            )
         train_loss = sum(train_losses) / max(1, len(train_losses))
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         print(f"epoch={epoch} train_loss={train_loss:.6g} val_loss={val_loss:.6g}")
@@ -112,17 +127,27 @@ def main() -> None:
         model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        metrics = evaluate_model(model, val_batch)
+        metrics = evaluate_model(model, val_batch, options)
 
     output_dir = args.output_dir or default_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / "model.pt"
+    checkpoint_path = output_dir / f"{options.loss}_{options.covariance_mode}_model.pt"
     result = {
         "model_state_dict": model.state_dict(),
         "config": {
             "pe_dim": int(estimator_config.get("pe_dim", 8)),
             "hidden_layers": estimator_config.get("hidden_layers", [128, 128]),
             "u_max": float(estimator_config.get("u_max", 1.0)),
+            "covariance_mode": options.covariance_mode,
+            "min_variance": options.min_variance,
+            "max_variance": options.max_variance,
+            "loss": options.loss,
+            "nll_weight": options.nll_weight,
+            "mse_weight": options.mse_weight,
+            "sigma_p": options.sigma_p,
+            "sigma_v": options.sigma_v,
+            "process_noise_q": options.process_noise_q,
+            "dt": options.dt,
         },
         "dataset": str(args.dataset),
         "history": history,
@@ -139,21 +164,59 @@ def residual_loss(
     model: AoiResidualNetwork,
     batch: tuple[Tensor, ...],
     loss_weights: Tensor,
+    options: "TrainingOptions",
 ) -> Tensor:
     cached, kin, true, aoi, comm_mask, delta_t = batch
-    pred, _, _ = model(cached, kin, aoi, delta_t, comm_mask)
-    return (((pred - true) ** 2) * loss_weights).mean()
+    kin_cov_diag = kinematic_covariance_diag(aoi, options, device=kin.device, dtype=kin.dtype)
+    pred, _, _, cov_diag = model(
+        cached,
+        kin,
+        aoi,
+        delta_t,
+        comm_mask,
+        kin_cov_diag=kin_cov_diag,
+        min_variance=options.min_variance,
+        max_variance=options.max_variance,
+    )
+    mse_loss = weighted_mse_loss(pred, true, loss_weights)
+    if options.loss == "mse":
+        return mse_loss
+
+    assert cov_diag is not None
+    nll_loss = gaussian_nll_loss(pred, true, cov_diag)
+    if options.loss == "nll":
+        return options.nll_weight * nll_loss
+    return options.nll_weight * nll_loss + options.mse_weight * mse_loss
 
 
-def evaluate_model(model: AoiResidualNetwork, batch: tuple[Tensor, ...]) -> dict[str, Any]:
+def evaluate_model(
+    model: AoiResidualNetwork,
+    batch: tuple[Tensor, ...],
+    options: "TrainingOptions",
+) -> dict[str, Any]:
     cached, kin, true, aoi, comm_mask, delta_t = batch
-    pred, _, rho = model(cached, kin, aoi, delta_t, comm_mask)
+    kin_cov_diag = kinematic_covariance_diag(aoi, options, device=kin.device, dtype=kin.dtype)
+    pred, _, rho, cov_diag = model(
+        cached,
+        kin,
+        aoi,
+        delta_t,
+        comm_mask,
+        kin_cov_diag=kin_cov_diag,
+        min_variance=options.min_variance,
+        max_variance=options.max_variance,
+    )
+    assert cov_diag is not None
     metrics = {
         "stale_mse": mse(cached, true),
         "kinematic_mse": mse(kin, true),
         "residual_mse": mse(pred, true),
+        "kinematic_nll": nll(kin, true, kin_cov_diag),
+        "residual_nll": nll(pred, true, cov_diag),
+        "mean_kinematic_variance": float(kin_cov_diag.mean().detach().cpu().item()),
+        "mean_pred_variance": float(cov_diag.mean().detach().cpu().item()),
         "mean_gate": float(rho.mean().detach().cpu().item()),
-        "aoi_bins": binned_metrics(aoi, cached, kin, pred, true),
+        "aoi_bins": binned_metrics(aoi, cached, kin, pred, true, kin_cov_diag, cov_diag),
     }
     return metrics
 
@@ -164,6 +227,8 @@ def binned_metrics(
     kin: Tensor,
     pred: Tensor,
     true: Tensor,
+    kin_cov_diag: Tensor,
+    pred_cov_diag: Tensor,
 ) -> list[dict[str, float | str | int]]:
     bins = [
         (0.0, 1.0),
@@ -191,13 +256,124 @@ def binned_metrics(
                 "stale_mse": mse(cached[mask], true[mask]),
                 "kinematic_mse": mse(kin[mask], true[mask]),
                 "residual_mse": mse(pred[mask], true[mask]),
+                "kinematic_nll": nll(kin[mask], true[mask], kin_cov_diag[mask]),
+                "residual_nll": nll(pred[mask], true[mask], pred_cov_diag[mask]),
+                "mean_kinematic_variance": float(
+                    kin_cov_diag[mask].mean().detach().cpu().item()
+                ),
+                "mean_pred_variance": float(
+                    pred_cov_diag[mask].mean().detach().cpu().item()
+                ),
             }
         )
     return rows
 
 
+def weighted_mse_loss(pred: Tensor, target: Tensor, loss_weights: Tensor) -> Tensor:
+    return (((pred - target) ** 2) * loss_weights).mean()
+
+
+def gaussian_nll_loss(pred: Tensor, target: Tensor, covariance_diag: Tensor) -> Tensor:
+    return 0.5 * (
+        torch.log(covariance_diag) + (target - pred).square() / covariance_diag
+    ).sum(dim=-1).mean()
+
+
 def mse(pred: Tensor, target: Tensor) -> float:
     return float(((pred - target) ** 2).mean().detach().cpu().item())
+
+
+def nll(pred: Tensor, target: Tensor, covariance_diag: Tensor) -> float:
+    return float(gaussian_nll_loss(pred, target, covariance_diag).detach().cpu().item())
+
+
+def kinematic_covariance_diag(
+    aoi: Tensor,
+    options: "TrainingOptions",
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    delta_t = aoi.to(device=device, dtype=dtype) * float(options.dt)
+    dt2 = delta_t.square()
+    dt3 = dt2 * delta_t
+    pos_var = (
+        options.sigma_p**2
+        + dt2 * options.sigma_v**2
+        + options.process_noise_q * dt3 / 3.0
+    )
+    vel_var = options.sigma_v**2 + options.process_noise_q * delta_t
+    return torch.stack([pos_var, pos_var, vel_var, vel_var], dim=-1).clamp(
+        min=options.min_variance,
+        max=options.max_variance,
+    )
+
+
+@dataclass(frozen=True)
+class TrainingOptions:
+    loss: str
+    covariance_mode: str
+    min_variance: float
+    max_variance: float
+    nll_weight: float
+    mse_weight: float
+    sigma_p: float
+    sigma_v: float
+    process_noise_q: float
+    dt: float
+
+
+def training_options(
+    args: argparse.Namespace,
+    estimator_config: dict[str, Any],
+    dataset: dict[str, Any],
+) -> TrainingOptions:
+    loss = str(args.loss or estimator_config.get("loss", "mse"))
+    if loss not in {"mse", "nll", "nll_mse"}:
+        raise ValueError(f"Unknown loss={loss!r}. Expected mse, nll, or nll_mse")
+    covariance_mode = str(
+        args.covariance_mode
+        or estimator_config.get("covariance_mode", "fixed_kinematic")
+    )
+    if covariance_mode not in {"fixed_kinematic", "learned_diag"}:
+        raise ValueError(
+            f"Unknown covariance_mode={covariance_mode!r}. "
+            "Expected fixed_kinematic or learned_diag"
+        )
+    min_variance = float(
+        args.min_variance
+        if args.min_variance is not None
+        else estimator_config.get("min_variance", 1.0e-4)
+    )
+    max_variance = float(
+        args.max_variance
+        if args.max_variance is not None
+        else estimator_config.get("max_variance", 10.0)
+    )
+    if min_variance <= 0:
+        raise ValueError("--min-variance must be positive for Gaussian NLL")
+    if max_variance <= min_variance:
+        raise ValueError("--max-variance must be greater than --min-variance")
+
+    return TrainingOptions(
+        loss=loss,
+        covariance_mode=covariance_mode,
+        min_variance=min_variance,
+        max_variance=max_variance,
+        nll_weight=float(
+            args.nll_weight
+            if args.nll_weight is not None
+            else estimator_config.get("nll_weight", 1.0)
+        ),
+        mse_weight=float(
+            args.mse_weight
+            if args.mse_weight is not None
+            else estimator_config.get("mse_weight", 0.1)
+        ),
+        sigma_p=float(estimator_config.get("sigma_p", 0.01)),
+        sigma_v=float(estimator_config.get("sigma_v", 0.01)),
+        process_noise_q=float(estimator_config.get("process_noise_q", 1.0)),
+        dt=float(estimator_config.get("dt", 0.1)),
+    )
 
 
 def make_loader(

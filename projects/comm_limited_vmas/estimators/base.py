@@ -29,3 +29,21 @@ class BaseEstimator(ABC):
     @abstractmethod
     def covariance_diag(self, aoi_steps: Tensor) -> Tensor:
         """Return covariance diagonal with shape ``aoi_steps.shape + (state_dim,)``."""
+
+    def estimate_distribution(
+        self,
+        cached_state: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Return estimated state and covariance diagonal.
+
+        Estimators that only model AoI-dependent uncertainty can rely on this default.
+        Richer estimators may override it when covariance depends on cached state or mask.
+        """
+        mean = self.estimate_state(cached_state, aoi_steps, comm_mask)
+        covariance_diag = self.covariance_diag(aoi_steps).to(
+            device=mean.device,
+            dtype=mean.dtype,
+        )
+        return mean, covariance_diag

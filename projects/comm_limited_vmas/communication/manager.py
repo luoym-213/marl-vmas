@@ -141,8 +141,15 @@ class CommunicationManager:
         return self.estimator.estimate_state(cached_states, aoi_steps, comm_mask)
 
     def get_estimator_covariance_diag(self, receiver: int) -> Tensor:
+        cached_states = self.cache.get_receiver_states(receiver)
         aoi_steps = self.cache.get_aoi(receiver, self.current_steps)
-        return self.estimator.covariance_diag(aoi_steps)
+        comm_mask = self.current_comm_mask[:, receiver]
+        _, covariance_diag = self.estimator.estimate_distribution(
+            cached_states,
+            aoi_steps,
+            comm_mask,
+        )
+        return covariance_diag
 
     def get_aoi(self, receiver: int) -> Tensor:
         return self.cache.get_aoi(receiver, self.current_steps)
