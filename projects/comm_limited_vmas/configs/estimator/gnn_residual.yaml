@@ -11,7 +11,7 @@ base_estimator:
   covariance_mode: fixed_kinematic
   min_variance: 1.0e-4
   max_variance: 10.0
-  checkpoint_path: outputs/estimators/aoi_residual/radius_delay_mean8_dropout03_seed0/nll_fixed_kinematic_model.pt
+  checkpoint_path: outputs/estimators/aoi_residual/radius_delay_mean8_dropout03_seed0/mse_fixed_kinematic_model.pt
   fallback_to_kinematic: false
 pe_dim: 8
 hidden_dim: 128
@@ -19,5 +19,5 @@ num_layers: 2
 node_hidden_layers: [128]
 edge_hidden_layers: [128]
 gate_hidden_layers: [128]
-checkpoint_path: outputs/estimators/gnn_residual/radius_delay_mean8_dropout03_seed0/model.pt
-fallback_to_base: true
+checkpoint_path: outputs/estimators/gnn_residual/mse_fixed_kinematic_radius_delay_mean8_dropout03_seed0/model.pt
+fallback_to_base: false
