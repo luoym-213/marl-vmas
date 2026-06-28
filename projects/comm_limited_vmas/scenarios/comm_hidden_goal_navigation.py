@@ -205,15 +205,13 @@ class Scenario(BaseScenario):
 
         aoi = self._comm_manager.get_aoi(ego_index)
         comm_mask = self._comm_manager.get_current_comm_mask(ego_index)
+        estimated_states = self._comm_manager.get_estimated_receiver_states(ego_index)
 
         teammate_blocks = []
         for other_index, _ in enumerate(self.world.agents):
             if other_index == ego_index:
                 continue
-            cached_state = self._comm_manager.get_state(
-                receiver=ego_index,
-                sender=other_index,
-            )
+            cached_state = estimated_states[:, other_index]
             teammate_blocks.append(
                 torch.cat(
                     [

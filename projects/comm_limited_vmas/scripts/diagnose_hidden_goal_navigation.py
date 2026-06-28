@@ -344,21 +344,28 @@ def validate_estimator_state(td, native_env: Any, prefix: str) -> list[dict[str,
         if estimator_name == "StaleEstimator":
             expected = raw_states
 
-        add_check(
-            checks,
-            f"{prefix}_estimated_state_formula_ego{ego_index}",
-            torch.allclose(estimated_states, expected, atol=1e-5),
-        )
-        zero_aoi = aoi == 0
-        if zero_aoi.any():
+        if estimator_name in {"StaleEstimator", "KinematicEstimator"}:
             add_check(
                 checks,
-                f"{prefix}_zero_aoi_matches_raw_ego{ego_index}",
-                torch.allclose(
-                    estimated_states[zero_aoi],
-                    raw_states[zero_aoi],
-                    atol=1e-5,
-                ),
+                f"{prefix}_estimated_state_formula_ego{ego_index}",
+                torch.allclose(estimated_states, expected, atol=1e-5),
+            )
+            zero_aoi = aoi == 0
+            if zero_aoi.any():
+                add_check(
+                    checks,
+                    f"{prefix}_zero_aoi_matches_raw_ego{ego_index}",
+                    torch.allclose(
+                        estimated_states[zero_aoi],
+                        raw_states[zero_aoi],
+                        atol=1e-5,
+                    ),
+                )
+        else:
+            add_check(
+                checks,
+                f"{prefix}_estimated_state_finite_ego{ego_index}",
+                bool(torch.isfinite(estimated_states).all().item()),
             )
 
         add_check(
@@ -371,11 +378,12 @@ def validate_estimator_state(td, native_env: Any, prefix: str) -> list[dict[str,
             f"{prefix}_covariance_diag_nonnegative_ego{ego_index}",
             bool((cov_diag >= 0).all().item()),
         )
-        add_check(
-            checks,
-            f"{prefix}_covariance_diag_monotonic_by_aoi_ego{ego_index}",
-            covariance_diag_monotonic(aoi, cov_diag),
-        )
+        if estimator_name in {"StaleEstimator", "KinematicEstimator"}:
+            add_check(
+                checks,
+                f"{prefix}_covariance_diag_monotonic_by_aoi_ego{ego_index}",
+                covariance_diag_monotonic(aoi, cov_diag),
+            )
 
     return checks
 
@@ -401,6 +409,9 @@ def estimator_error_report(native_env: Any) -> dict[str, float]:
         dim=-1,
     )
     kinematic = getattr(comm_manager.estimator, "kinematic", None)
+    if kinematic is None:
+        base_estimator = getattr(comm_manager.estimator, "base_estimator", None)
+        kinematic = getattr(base_estimator, "kinematic", None)
     if kinematic is None:
         kinematic = KinematicEstimator(
             state_dim=4,

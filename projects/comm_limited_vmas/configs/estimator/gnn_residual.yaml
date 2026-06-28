@@ -1,0 +1,23 @@
+name: gnn_residual
+base_estimator:
+  name: aoi_residual
+  sigma_p: 0.01
+  sigma_v: 0.01
+  process_noise_q: 1.0
+  max_extrapolation_steps: 15
+  pe_dim: 8
+  hidden_layers: [128, 128]
+  u_max: 1.0
+  covariance_mode: fixed_kinematic
+  min_variance: 1.0e-4
+  max_variance: 10.0
+  checkpoint_path: outputs/estimators/aoi_residual/radius_delay_mean8_dropout03_seed0/nll_fixed_kinematic_model.pt
+  fallback_to_kinematic: false
+pe_dim: 8
+hidden_dim: 128
+num_layers: 2
+node_hidden_layers: [128]
+edge_hidden_layers: [128]
+gate_hidden_layers: [128]
+checkpoint_path: outputs/estimators/gnn_residual/radius_delay_mean8_dropout03_seed0/model.pt
+fallback_to_base: true

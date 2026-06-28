@@ -11,6 +11,10 @@ from comm_limited_vmas.estimators.aoi_residual import (
     AoiResidualEstimator,
     AoiResidualNetwork,
 )
+from comm_limited_vmas.estimators.gnn_residual import (
+    GnnResidualEstimator,
+    GnnResidualNetwork,
+)
 from comm_limited_vmas.estimators.kinematic import KinematicEstimator
 from comm_limited_vmas.estimators.stale import StaleEstimator
 
@@ -35,6 +39,13 @@ def build_estimator(
             dt=dt,
             **config,
         )
+    if name == "gnn_residual":
+        return GnnResidualEstimator(
+            state_dim=state_dim,
+            device=device,
+            dt=dt,
+            **config,
+        )
 
     raise ValueError(f"Unknown estimator: {name}")
 
@@ -43,6 +54,8 @@ __all__ = [
     "AoiResidualEstimator",
     "AoiResidualNetwork",
     "BaseEstimator",
+    "GnnResidualEstimator",
+    "GnnResidualNetwork",
     "KinematicEstimator",
     "StaleEstimator",
     "build_estimator",

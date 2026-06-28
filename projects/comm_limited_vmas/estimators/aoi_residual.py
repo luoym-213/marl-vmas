@@ -217,6 +217,25 @@ class AoiResidualEstimator(BaseEstimator):
     def covariance_diag(self, aoi_steps: Tensor) -> Tensor:
         return self.kinematic.covariance_diag(aoi_steps)
 
+    def estimate_receiver_states(
+        self,
+        cached_states: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+        receiver: int | None = None,
+    ) -> Tensor:
+        mean, _ = self.estimate_distribution(cached_states, aoi_steps, comm_mask)
+        return mean
+
+    def estimate_receiver_distribution(
+        self,
+        cached_states: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+        receiver: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        return self.estimate_distribution(cached_states, aoi_steps, comm_mask)
+
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         checkpoint_path = checkpoint_path.expanduser()
         if not checkpoint_path.exists():

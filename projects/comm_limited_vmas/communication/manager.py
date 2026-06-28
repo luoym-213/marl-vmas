@@ -126,10 +126,7 @@ class CommunicationManager:
         self.cache.update_self(states, self.current_steps)
 
     def get_state(self, receiver: int, sender: int) -> Tensor:
-        cached_state = self.cache.get_state(receiver, sender)
-        aoi_steps = self.cache.get_aoi(receiver, self.current_steps)[:, sender]
-        comm_mask = self.current_comm_mask[:, receiver, sender]
-        return self.estimator.estimate_state(cached_state, aoi_steps, comm_mask)
+        return self.get_estimated_receiver_states(receiver)[:, sender]
 
     def get_receiver_states(self, receiver: int) -> Tensor:
         return self.cache.get_receiver_states(receiver)
@@ -138,16 +135,22 @@ class CommunicationManager:
         cached_states = self.cache.get_receiver_states(receiver)
         aoi_steps = self.cache.get_aoi(receiver, self.current_steps)
         comm_mask = self.current_comm_mask[:, receiver]
-        return self.estimator.estimate_state(cached_states, aoi_steps, comm_mask)
+        return self.estimator.estimate_receiver_states(
+            cached_states,
+            aoi_steps,
+            comm_mask,
+            receiver=receiver,
+        )
 
     def get_estimator_covariance_diag(self, receiver: int) -> Tensor:
         cached_states = self.cache.get_receiver_states(receiver)
         aoi_steps = self.cache.get_aoi(receiver, self.current_steps)
         comm_mask = self.current_comm_mask[:, receiver]
-        _, covariance_diag = self.estimator.estimate_distribution(
+        _, covariance_diag = self.estimator.estimate_receiver_distribution(
             cached_states,
             aoi_steps,
             comm_mask,
+            receiver=receiver,
         )
         return covariance_diag
 

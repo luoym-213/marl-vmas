@@ -47,3 +47,32 @@ class BaseEstimator(ABC):
             dtype=mean.dtype,
         )
         return mean, covariance_diag
+
+    def estimate_receiver_states(
+        self,
+        cached_states: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+        receiver: int | None = None,
+    ) -> Tensor:
+        """Return all sender estimates for one receiver.
+
+        The default is element-wise and works for non-graph estimators. Graph
+        estimators can override this to use all sender nodes jointly.
+        """
+        return self.estimate_state(cached_states, aoi_steps, comm_mask)
+
+    def estimate_receiver_distribution(
+        self,
+        cached_states: Tensor,
+        aoi_steps: Tensor,
+        comm_mask: Tensor | None = None,
+        receiver: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Return all sender means and covariance diagonals for one receiver."""
+        mean = self.estimate_receiver_states(cached_states, aoi_steps, comm_mask, receiver)
+        covariance_diag = self.covariance_diag(aoi_steps).to(
+            device=mean.device,
+            dtype=mean.dtype,
+        )
+        return mean, covariance_diag
