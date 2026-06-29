@@ -12,5 +12,5 @@ max_variance: 10.0
 loss: nll_mse
 nll_weight: 1.0
 mse_weight: 0.1
-checkpoint_path: outputs/estimators/aoi_residual/radius_delay_mean8_dropout03_seed0/mse_fixed_kinematic_model.pt
+checkpoint_path: outputs/estimators/aoi_residual/0.9_radius_delay_mean8_dropout03_seed0/mse_fixed_kinematic_model.pt
 fallback_to_kinematic: false
