@@ -36,6 +36,160 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
         "success_reward": 20.0,
         "comms_rendering_range": 0.0,
     },
+    "spread_mpe_parity": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_physics_parity": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "mpe_action_force_scale": 5.0,
+        "world_substeps": 1,
+        "world_collision_force": 100,
+        "world_contact_margin": 0.001,
+        "world_dt": 0.1,
+        "world_drag": 0.25,
+        "world_linear_friction": 0.0,
+        "world_angular_friction": 0.0,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_physics_spawn_parity": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "mpe_action_force_scale": 5.0,
+        "world_substeps": 1,
+        "world_collision_force": 100,
+        "world_contact_margin": 0.001,
+        "world_dt": 0.1,
+        "world_drag": 0.25,
+        "world_linear_friction": 0.0,
+        "world_angular_friction": 0.0,
+        "mpe_independent_spawn": True,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_physics_spawn_oldppo": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "mpe_action_force_scale": 5.0,
+        "world_substeps": 1,
+        "world_collision_force": 100,
+        "world_contact_margin": 0.001,
+        "world_dt": 0.1,
+        "world_drag": 0.25,
+        "world_linear_friction": 0.0,
+        "world_angular_friction": 0.0,
+        "mpe_independent_spawn": True,
+        "reward_return_norm": True,
+        "reward_return_clip": 10.0,
+        "reward_return_gamma": 0.99,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_global_critic": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "emit_global_state": True,
+        "global_state_include_pairwise": True,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_actor_rel": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "parity_include_other_agents": True,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
+    "spread_mpe_richer_both": {
+        "max_steps": 50,
+        "n_agents": 3,
+        "n_landmarks": 3,
+        "continuous_actions": False,
+        "reward_mode": "mpe_parity",
+        "parity_include_other_agents": True,
+        "emit_global_state": True,
+        "global_state_include_pairwise": True,
+        "coverage_radius": 0.1,
+        "dist_threshold": 0.1,
+        "collision_penalty": 0.0,
+        "out_of_bounds_penalty": 0.0,
+        "distance_reward_scale": 1.0,
+        "coverage_reward": 0.0,
+        "success_reward": 0.0,
+        "shared_rew": True,
+        "done_when_all_covered": True,
+        "comms_rendering_range": 0.0,
+    },
     "spread_gnn": {
         "max_steps": 100,
         "n_agents": 3,
@@ -152,6 +306,8 @@ def build_experiment_config(
     restore_file: str | None = None,
     restore_map_location: str | None = None,
     max_n_frames: int | None = None,
+    render: bool = True,
+    old_ppo_profile: bool = False,
 ):
     from benchmarl.experiment import ExperimentConfig
 
@@ -161,7 +317,7 @@ def build_experiment_config(
     config.train_device = train_device
     config.gamma = 0.99
     config.evaluation = True
-    config.render = True
+    config.render = render
     config.share_policy_params = True
     config.checkpoint_interval = 300_000
     config.checkpoint_at_end = True
@@ -190,6 +346,16 @@ def build_experiment_config(
         config.evaluation_interval = 120_000
         config.evaluation_episodes = 200
 
+    if old_ppo_profile:
+        config.lr = 1e-4
+        config.on_policy_collected_frames_per_batch = 4_096
+        config.on_policy_n_envs_per_worker = 32
+        config.on_policy_n_minibatch_iters = 4
+        config.on_policy_minibatch_size = 128
+        config.evaluation_interval = 40_960
+        config.checkpoint_interval = 409_600
+        config.evaluation_episodes = 200
+
     if max_n_frames is not None:
         config.max_n_frames = max_n_frames
         if quick:
@@ -212,14 +378,14 @@ def build_experiment_config(
     return config
 
 
-def build_mappo_config():
+def build_mappo_config(*, old_ppo_profile: bool = False):
     from benchmarl.algorithms import MappoConfig
 
     return MappoConfig(
         share_param_critic=True,
         clip_epsilon=0.2,
         entropy_coef=0.01,
-        critic_coef=1,
+        critic_coef=0.5 if old_ppo_profile else 1,
         loss_critic_type="l2",
         lmbda=0.95,
         scale_mapping="biased_softplus_1.0",

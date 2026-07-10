@@ -251,7 +251,27 @@ class AsyncSMDPCollector:
         agent_pos = torch.stack([agent.state.pos for agent in self.env.agents], dim=1)
         agent_vel = torch.stack([agent.state.vel for agent in self.env.agents], dim=1)
         battery = 1.0 - scenario.world_steps.float() / max(float(scenario.max_steps), 1.0)
-        ego_nodes_all = torch.cat([agent_pos, agent_vel, battery.view(-1, 1, 1).expand(-1, scenario.n_agents, 1)], dim=-1)
+        ego_parts = [
+            agent_pos,
+            agent_vel,
+            battery.view(-1, 1, 1).expand(-1, scenario.n_agents, 1),
+        ]
+        if getattr(scenario, "high_level_progress_features", False):
+            detected_count = scenario.target_detected.any(dim=1).float().sum(dim=-1)
+            visited_count = scenario.target_visited.float().sum(dim=-1)
+            active_count = scenario.active_agents.float().sum(dim=-1)
+            entropy_remaining = scenario._compute_entropy(scenario.belief_maps).mean(dim=(-1, -2, -3))
+            progress = torch.stack(
+                [
+                    detected_count / max(float(scenario.n_targets), 1.0),
+                    visited_count / max(float(scenario.n_targets), 1.0),
+                    active_count / max(float(scenario.n_agents), 1.0),
+                    entropy_remaining,
+                ],
+                dim=-1,
+            )
+            ego_parts.append(progress.view(-1, 1, 4).expand(-1, scenario.n_agents, 4))
+        ego_nodes_all = torch.cat(ego_parts, dim=-1)
         dist_to_goal = torch.linalg.vector_norm(scenario.assigned_goals - agent_pos, dim=-1, keepdim=True)
         teammate_nodes_all = torch.cat([agent_pos, agent_vel, dist_to_goal], dim=-1)
         teammate_mask_all = scenario.active_agents.unsqueeze(-1).float()
@@ -272,8 +292,44 @@ class AsyncSMDPCollector:
         target_heatmaps = scenario._target_heatmaps()
         map_channels_all = torch.stack([entropy_maps, scenario.belief_maps, target_heatmaps], dim=2)
         target_pos = scenario.detected_targets[:, :, :, 0:2] - agent_pos[:, :, None, :]
-        target_nodes_all = torch.cat([target_pos, scenario.detected_targets[:, :, :, 2:4]], dim=-1)
+        target_parts = [target_pos, scenario.detected_targets[:, :, :, 2:4]]
         target_claimed = scenario._target_claimed().bool()
+        if getattr(scenario, "target_assignment_features", False):
+            target_abs_pos = torch.stack([target.state.pos for target in scenario.targets], dim=1)
+            collect_task = scenario.assigned_tasks[..., 0] > 0.5
+            assigned_dists = torch.cdist(scenario.assigned_goals, target_abs_pos)
+            assigned_min_dist, assigned_index = assigned_dists.min(dim=-1)
+            assigned_valid = collect_task & (assigned_min_dist <= scenario.goal_radius) & scenario.active_agents
+            assigned_one_hot = torch.nn.functional.one_hot(
+                assigned_index.clamp_min(0),
+                num_classes=scenario.n_targets,
+            ).bool()
+            assigned_one_hot = assigned_one_hot & assigned_valid.unsqueeze(-1)
+            claim_count = assigned_one_hot.float().sum(dim=1) / max(float(scenario.n_agents), 1.0)
+            active_target_dists = torch.cdist(agent_pos, target_abs_pos).masked_fill(
+                ~scenario.active_agents.unsqueeze(-1),
+                torch.inf,
+            )
+            nearest_active_dist = active_target_dists.min(dim=1).values
+            nearest_active_dist = torch.where(
+                torch.isfinite(nearest_active_dist),
+                nearest_active_dist / max(float(scenario.world_size), 1e-6),
+                torch.ones_like(nearest_active_dist),
+            )
+            detected_age = torch.where(
+                scenario.target_detected_step >= 0,
+                (scenario.world_steps.view(-1, 1) - scenario.target_detected_step).float()
+                / max(float(scenario.max_steps), 1.0),
+                torch.zeros_like(nearest_active_dist),
+            )
+            assignment_features = torch.stack(
+                [claim_count, nearest_active_dist, detected_age],
+                dim=-1,
+            )
+            target_parts.append(
+                assignment_features.unsqueeze(1).expand(-1, scenario.n_agents, -1, -1)
+            )
+        target_nodes_all = torch.cat(target_parts, dim=-1)
         target_mask_all = (
             scenario.target_detected
             & ~scenario.target_visited[:, None, :]
@@ -286,6 +342,15 @@ class AsyncSMDPCollector:
             dtype=torch.bool,
             device=scenario.world.device,
         )
+        if getattr(scenario, "staged_rescue", False):
+            detected_count = scenario.target_detected.any(dim=1).float().sum(dim=-1)
+            allow_rescue = detected_count >= float(getattr(scenario, "rescue_detected_threshold", scenario.n_targets))
+            entropy_threshold = getattr(scenario, "rescue_entropy_threshold", None)
+            if entropy_threshold is not None:
+                entropy_remaining = scenario._compute_entropy(scenario.belief_maps).mean(dim=(-1, -2, -3))
+                allow_rescue = allow_rescue | (entropy_remaining <= float(entropy_threshold))
+            allow_rescue = allow_rescue.view(-1, 1, 1)
+            target_mask_all = target_mask_all & allow_rescue
         action_mask_all = torch.cat([explore_mask_all, target_mask_all], dim=-1)
 
         return {

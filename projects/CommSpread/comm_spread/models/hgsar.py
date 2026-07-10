@@ -164,7 +164,8 @@ class HeterogeneousGraphActor(nn.Module):
         if no_valid.any():
             valid[no_valid, :n_explore] = True
 
-        task_nodes = torch.cat([explore_nodes, target_nodes], dim=1)
+        target_task_nodes = target_nodes[..., : explore_nodes.shape[-1]]
+        task_nodes = torch.cat([explore_nodes, target_task_nodes], dim=1)
         task_feats = torch.cat([explore_feats, target_feats], dim=1)
         task_feats = self.task_team_hmpnn(
             ego_nodes[:, :2],

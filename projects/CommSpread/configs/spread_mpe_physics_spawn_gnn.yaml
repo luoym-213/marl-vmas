@@ -1,0 +1,14 @@
+# Entity/message-passing candidate for the current MPE-physics baseline.
+# Command surface:
+#   PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/train_mappo.py
+#   --variant spread_mpe_physics_spawn_parity --model gnn --comms-radius 1.0
+#   --train-device cuda:0 --sampling-device cuda:0
+variant: spread_mpe_physics_spawn_parity
+model: gnn
+comms_radius: 1.0
+train_device: cuda:0
+sampling_device: cuda:0
+max_n_frames: 3000000
+seeds: [0, 1, 2]
+save_folder: projects/CommSpread/outputs/physics_spawn_gnn
+status: smoke_passed_full_seed0_stopped_early

@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
         help="Run the long training setup instead of the quick smoke run.",
     )
     parser.add_argument("--save-folder", default="outputs", help="Directory to save the experiment.")
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="Disable evaluation rendering, useful on headless training machines.",
+    )
     return parser.parse_args()
 
 
@@ -72,7 +77,7 @@ def main() -> None:
     task = task_member.update_config(task_config)
     experiment = Experiment(
         task=task,
-        algorithm_config=build_mappo_config(),
+        algorithm_config=build_mappo_config(old_ppo_profile=args.variant.endswith("oldppo")),
         model_config=model_config,
         critic_model_config=critic_model_config,
         seed=args.seed,
@@ -84,6 +89,8 @@ def main() -> None:
             restore_file=args.restore_file,
             restore_map_location=args.restore_map_location,
             max_n_frames=args.max_n_frames,
+            render=not args.no_render,
+            old_ppo_profile=args.variant.endswith("oldppo"),
         ),
     )
     experiment.run()

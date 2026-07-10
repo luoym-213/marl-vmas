@@ -39,6 +39,18 @@ DEFAULT_SAR_CONFIG: dict[str, Any] = {
     "goal_reward": 3.0,
     "rescue_reward": 10.0,
     "discovery_reward": 1.0,
+    "early_rescue_penalty": 0.0,
+    "early_rescue_detected_threshold": 3,
+    "search_capacity_discovery_bonus": 0.0,
+    "discovery_active_agents_threshold": 2,
+    "all_targets_detected_bonus": 0.0,
+    "all_targets_detected_bonus_requires_no_rescue": True,
+    "rescue_phase_explore_penalty": 0.0,
+    "rescue_phase_detected_threshold": 2,
+    "rescue_phase_min_search_agents": 1,
+    "unique_rescue_assignment_bonus": 0.0,
+    "duplicate_rescue_assignment_penalty": 0.0,
+    "detected_unassigned_target_penalty": 0.0,
     "distance_reward_scale": 1.0,
     "collision_penalty": -10.0,
     "collision_distance": 0.0,
@@ -111,12 +123,15 @@ def make_sar_env(
     config = DEFAULT_SAR_CONFIG | scenario_config
     if max_steps is not None:
         config["max_steps"] = max_steps
+    wrapper_max_steps = config.pop("max_steps", None)
+    config["scenario_max_steps"] = wrapper_max_steps
     return make_env(
         scenario=SarScenario(),
         num_envs=num_envs,
         device=device,
         seed=seed,
         continuous_actions=continuous_actions,
+        max_steps=wrapper_max_steps,
         dict_spaces=False,
         multidiscrete_actions=False,
         grad_enabled=False,

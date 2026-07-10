@@ -28,9 +28,8 @@ except AttributeError:
 
 
 DEFAULT_CHECKPOINT = Path(
-    "outputs/sar_low_full/"
-    "mappo_sar_low_mlp__f4788a9a_26_06_17-04_08_10/"
-    "checkpoints/checkpoint_50040000.pt"
+    "projects/CommSpread/outputs/sar_low_full/"
+    "low_safe_0.06/checkpoints/checkpoint_50040000.pt"
 )
 
 CSV_FIELDS = [
@@ -77,6 +76,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--save-folder", type=Path, default=Path("outputs/sar_high_ppo"))
     parser.add_argument("--save-interval", type=int, default=10)
+    parser.add_argument("--sensor-radius", type=float, default=0.3)
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--retire-on-rescue", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--progress-features", action="store_true")
+    parser.add_argument("--target-assignment-features", action="store_true")
+    parser.add_argument("--staged-rescue", action="store_true")
+    parser.add_argument("--rescue-detected-threshold", type=int, default=2)
+    parser.add_argument("--rescue-entropy-threshold", type=float, default=None)
+    parser.add_argument("--early-rescue-penalty", type=float, default=0.0)
+    parser.add_argument("--early-rescue-detected-threshold", type=int, default=3)
+    parser.add_argument("--search-capacity-discovery-bonus", type=float, default=0.0)
+    parser.add_argument("--discovery-active-agents-threshold", type=int, default=2)
+    parser.add_argument("--all-targets-detected-bonus", type=float, default=0.0)
+    parser.add_argument(
+        "--all-targets-detected-bonus-requires-no-rescue",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--rescue-phase-explore-penalty", type=float, default=0.0)
+    parser.add_argument("--rescue-phase-detected-threshold", type=int, default=2)
+    parser.add_argument("--rescue-phase-min-search-agents", type=int, default=1)
+    parser.add_argument("--unique-rescue-assignment-bonus", type=float, default=0.0)
+    parser.add_argument("--duplicate-rescue-assignment-penalty", type=float, default=0.0)
+    parser.add_argument("--detected-unassigned-target-penalty", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -115,6 +138,26 @@ def main() -> None:
         enable_high_level_state=True,
         enable_rrt_candidates=True,
         auto_resample_goals=False,
+        sensor_radius=args.sensor_radius,
+        max_steps=args.max_steps,
+        retire_on_rescue=args.retire_on_rescue,
+        high_level_progress_features=args.progress_features,
+        target_assignment_features=args.target_assignment_features,
+        staged_rescue=args.staged_rescue,
+        rescue_detected_threshold=args.rescue_detected_threshold,
+        rescue_entropy_threshold=args.rescue_entropy_threshold,
+        early_rescue_penalty=args.early_rescue_penalty,
+        early_rescue_detected_threshold=args.early_rescue_detected_threshold,
+        search_capacity_discovery_bonus=args.search_capacity_discovery_bonus,
+        discovery_active_agents_threshold=args.discovery_active_agents_threshold,
+        all_targets_detected_bonus=args.all_targets_detected_bonus,
+        all_targets_detected_bonus_requires_no_rescue=args.all_targets_detected_bonus_requires_no_rescue,
+        rescue_phase_explore_penalty=args.rescue_phase_explore_penalty,
+        rescue_phase_detected_threshold=args.rescue_phase_detected_threshold,
+        rescue_phase_min_search_agents=args.rescue_phase_min_search_agents,
+        unique_rescue_assignment_bonus=args.unique_rescue_assignment_bonus,
+        duplicate_rescue_assignment_penalty=args.duplicate_rescue_assignment_penalty,
+        detected_unassigned_target_penalty=args.detected_unassigned_target_penalty,
     )
     scenario = env.scenario
     low_policy = BenchMARLLowLevelPolicy(
@@ -129,6 +172,8 @@ def main() -> None:
         rrt_top_k=scenario.rrt_top_k,
         device=args.device,
         deterministic=False,
+        ego_features=9 if args.progress_features else 5,
+        target_features=7 if args.target_assignment_features else 4,
     )
     optimizer = torch.optim.Adam(high_policy.parameters(), lr=args.lr)
     start_update = 0
@@ -334,13 +379,14 @@ def ppo_update(
 
 def index_batch(batch: dict[str, torch.Tensor], indices: torch.Tensor) -> dict[str, torch.Tensor]:
     indexed = {}
+    batch_size = batch["action"].shape[0]
     for key, value in batch.items():
-        if key in {"env_id", "agent_id", "decision_start_t", "duration"}:
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.shape[:1] == (batch_size,):
             indexed[key] = value[indices]
-        elif isinstance(value, torch.Tensor) and value.shape[0] == indices.shape[0]:
+        else:
             indexed[key] = value
-        elif isinstance(value, torch.Tensor) and value.shape[0] == batch["action"].shape[0]:
-            indexed[key] = value[indices]
     return indexed
 
 

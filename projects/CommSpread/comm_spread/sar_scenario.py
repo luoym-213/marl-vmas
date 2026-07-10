@@ -40,9 +40,14 @@ class SarScenario(BaseScenario):
             "enable_high_level_state",
             self.mode != "low",
         )
+        self.high_level_progress_features = kwargs.pop("high_level_progress_features", False)
+        self.target_assignment_features = kwargs.pop("target_assignment_features", False)
         self.n_agents = kwargs.pop("n_agents", 3)
         self.n_targets = kwargs.pop("n_targets", self.n_agents)
-        self.max_steps = kwargs.pop("max_steps", 100)
+        self.staged_rescue = kwargs.pop("staged_rescue", False)
+        self.rescue_detected_threshold = kwargs.pop("rescue_detected_threshold", self.n_targets)
+        self.rescue_entropy_threshold = kwargs.pop("rescue_entropy_threshold", None)
+        self.max_steps = kwargs.pop("scenario_max_steps", kwargs.pop("max_steps", 100))
 
         self.world_spawning_x = kwargs.pop("world_spawning_x", 1.0)
         self.world_spawning_y = kwargs.pop("world_spawning_y", 1.0)
@@ -60,6 +65,45 @@ class SarScenario(BaseScenario):
         self.goal_reward = kwargs.pop("goal_reward", 2.0)
         self.rescue_reward = kwargs.pop("rescue_reward", 10.0)
         self.discovery_reward = kwargs.pop("discovery_reward", 1.0)
+        self.early_rescue_penalty = kwargs.pop("early_rescue_penalty", 0.0)
+        self.early_rescue_detected_threshold = kwargs.pop(
+            "early_rescue_detected_threshold",
+            self.n_targets,
+        )
+        self.search_capacity_discovery_bonus = kwargs.pop(
+            "search_capacity_discovery_bonus",
+            0.0,
+        )
+        self.discovery_active_agents_threshold = kwargs.pop(
+            "discovery_active_agents_threshold",
+            2,
+        )
+        self.all_targets_detected_bonus = kwargs.pop("all_targets_detected_bonus", 0.0)
+        self.all_targets_detected_bonus_requires_no_rescue = kwargs.pop(
+            "all_targets_detected_bonus_requires_no_rescue",
+            True,
+        )
+        self.rescue_phase_explore_penalty = kwargs.pop("rescue_phase_explore_penalty", 0.0)
+        self.rescue_phase_detected_threshold = kwargs.pop(
+            "rescue_phase_detected_threshold",
+            2,
+        )
+        self.rescue_phase_min_search_agents = kwargs.pop(
+            "rescue_phase_min_search_agents",
+            1,
+        )
+        self.unique_rescue_assignment_bonus = kwargs.pop(
+            "unique_rescue_assignment_bonus",
+            0.0,
+        )
+        self.duplicate_rescue_assignment_penalty = kwargs.pop(
+            "duplicate_rescue_assignment_penalty",
+            0.0,
+        )
+        self.detected_unassigned_target_penalty = kwargs.pop(
+            "detected_unassigned_target_penalty",
+            0.0,
+        )
         self.distance_reward_scale = kwargs.pop("distance_reward_scale", 1.0)
         self.collision_penalty = kwargs.pop("collision_penalty", -20.0)
         self.collision_distance = kwargs.pop("collision_distance", 0.0)
@@ -194,6 +238,12 @@ class SarScenario(BaseScenario):
             dtype=torch.bool,
             device=device,
         )
+        self.target_detected_step = torch.full(
+            (batch_dim, self.n_targets),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
         self.detected_targets = torch.zeros(batch_dim, self.n_agents, self.n_targets, 4, device=device)
         self.explore_candidates = torch.zeros(
             batch_dim,
@@ -236,6 +286,7 @@ class SarScenario(BaseScenario):
         self.assigned_tasks[batch_slice] = 0.0
         self.target_detected[batch_slice] = False
         self.target_visited[batch_slice] = False
+        self.target_detected_step[batch_slice] = -1
         self.recent_decision_ttl[batch_slice] = 0
         self.recent_rrt_candidate_world[batch_slice] = 0.0
         self.success[batch_slice] = False
@@ -534,11 +585,24 @@ class SarScenario(BaseScenario):
         boundary_penalty = self._boundary_penalties()
         rewards = rewards + collision_penalty + boundary_penalty
 
+        active_count_before = self.active_agents.float().sum(dim=-1)
+        visited_count_before = self.target_visited.float().sum(dim=-1)
+        rescue_phase_reward = self._rescue_phase_rewards(active_count_before)
+        assignment_shaping_reward = self._assignment_shaping_rewards()
         rescue_reward = self._rescue_rewards()
-        discovery_reward = self._update_beliefs_and_discoveries()
+        discovery_reward = self._update_beliefs_and_discoveries(
+            active_count_before=active_count_before,
+            visited_count_before=visited_count_before,
+        )
         rewards = rewards + rescue_reward + self.goal_reward * self.goal_done.float()
 
-        self.high_rewards = (discovery_reward + rescue_reward - self.time_penalty) * active_float
+        self.high_rewards = (
+            discovery_reward
+            + rescue_reward
+            + rescue_phase_reward
+            + assignment_shaping_reward
+            - self.time_penalty
+        ) * active_float
         self.agent_rewards = rewards
 
         if self.auto_resample_goals:
@@ -604,9 +668,84 @@ class SarScenario(BaseScenario):
             penalties[:, i] = self.boundary_penalty * (out & self.active_agents[:, i]).float()
         return penalties
 
+    def _rescue_phase_rewards(self, active_count_before: Tensor) -> Tensor:
+        rewards = torch.zeros_like(self.agent_rewards)
+        if self.rescue_phase_explore_penalty <= 0:
+            return rewards
+        detected_any = self.target_detected.any(dim=1)
+        detected_count = detected_any.float().sum(dim=-1)
+        known_unvisited_count = (detected_any & ~self.target_visited).float().sum(dim=-1)
+        collect_task = self.assigned_tasks[..., 0] > 0.5
+        active_collect_count = (collect_task & self.active_agents).float().sum(dim=-1)
+        max_rescuers = (
+            active_count_before - float(self.rescue_phase_min_search_agents)
+        ).clamp(min=1.0, max=float(self.n_agents))
+        desired_rescuers = torch.minimum(known_unvisited_count, max_rescuers)
+        need_more_rescuers = active_collect_count < desired_rescuers
+        rescue_phase = (
+            (detected_count >= float(self.rescue_phase_detected_threshold))
+            & (known_unvisited_count > 0)
+            & need_more_rescuers
+        )
+        explore_task = ~collect_task
+        rewards = rewards - (
+            self.rescue_phase_explore_penalty
+            * rescue_phase.float().unsqueeze(-1)
+            * explore_task.float()
+            * self.active_agents.float()
+        )
+        return rewards
+
+    def _assignment_shaping_rewards(self) -> Tensor:
+        rewards = torch.zeros_like(self.agent_rewards)
+        if (
+            self.unique_rescue_assignment_bonus <= 0
+            and self.duplicate_rescue_assignment_penalty <= 0
+            and self.detected_unassigned_target_penalty <= 0
+        ):
+            return rewards
+        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        collect_task = self.assigned_tasks[..., 0] > 0.5
+        dists = torch.cdist(self.assigned_goals, target_pos)
+        min_dist, assigned_index = dists.min(dim=-1)
+        assigned_valid = collect_task & (min_dist <= self.goal_radius) & self.active_agents
+        assigned_one_hot = torch.nn.functional.one_hot(
+            assigned_index.clamp_min(0),
+            num_classes=self.n_targets,
+        ).bool()
+        assigned_one_hot = assigned_one_hot & assigned_valid.unsqueeze(-1)
+        detected_any = self.target_detected.any(dim=1)
+        known_unvisited = detected_any & ~self.target_visited
+        claim_counts = assigned_one_hot.sum(dim=1)
+        if self.unique_rescue_assignment_bonus > 0:
+            unique_claim = (
+                assigned_one_hot
+                & known_unvisited.unsqueeze(1)
+                & (claim_counts == 1).unsqueeze(1)
+            )
+            rewards = rewards + self.unique_rescue_assignment_bonus * unique_claim.any(dim=-1).float()
+        if self.duplicate_rescue_assignment_penalty > 0:
+            duplicate_claim = (
+                assigned_one_hot
+                & known_unvisited.unsqueeze(1)
+                & (claim_counts > 1).unsqueeze(1)
+            )
+            rewards = rewards - self.duplicate_rescue_assignment_penalty * duplicate_claim.any(dim=-1).float()
+        if self.detected_unassigned_target_penalty > 0:
+            unassigned_count = (known_unvisited & (claim_counts == 0)).float().sum(dim=-1)
+            active_count = self.active_agents.float().sum(dim=-1).clamp_min(1.0)
+            rewards = rewards - (
+                self.detected_unassigned_target_penalty
+                * unassigned_count.unsqueeze(-1)
+                * self.active_agents.float()
+                / active_count.unsqueeze(-1)
+            )
+        return rewards
+
     def _rescue_rewards(self) -> Tensor:
         rewards = torch.zeros_like(self.agent_rewards)
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        detected_count = self.target_detected.any(dim=1).float().sum(dim=-1)
         for agent_index in range(self.n_agents):
             collect_task = self.assigned_tasks[:, agent_index, 0] > 0.5
             eligible = self.goal_done[:, agent_index] & collect_task & self.active_agents[:, agent_index]
@@ -626,13 +765,22 @@ class SarScenario(BaseScenario):
                 )
                 if new_visit.any():
                     rescue_order = self.target_visited.float().sum(dim=-1) + 1.0
-                    rewards[:, agent_index] += self.rescue_reward * rescue_order * new_visit.float()
+                    rescue_value = self.rescue_reward * rescue_order
+                    if self.early_rescue_penalty > 0:
+                        early_rescue = detected_count < float(self.early_rescue_detected_threshold)
+                        rescue_value = rescue_value - self.early_rescue_penalty * early_rescue.float()
+                    rewards[:, agent_index] += rescue_value * new_visit.float()
                     self.target_visited[:, target_index] |= new_visit
                     if self.retire_on_rescue:
                         self.active_agents[:, agent_index] &= ~new_visit
         return rewards
 
-    def _update_beliefs_and_discoveries(self) -> Tensor:
+    def _update_beliefs_and_discoveries(
+        self,
+        *,
+        active_count_before: Tensor | None = None,
+        visited_count_before: Tensor | None = None,
+    ) -> Tensor:
         before_entropy = self._compute_entropy(self.belief_maps).sum(dim=(-1, -2))
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
         for agent_index in range(self.n_agents):
@@ -654,12 +802,42 @@ class SarScenario(BaseScenario):
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
         agent_target_dist = torch.cdist(agent_pos, target_pos)
         active_mask = self.active_agents.unsqueeze(-1)
+        detected_any_before = self.target_detected.any(dim=1)
         newly_detected = (agent_target_dist <= self.sensor_radius) & active_mask
         newly_detected = newly_detected & ~self.target_detected
+        newly_detected_any = newly_detected.any(dim=1)
+        self.target_detected_step = torch.where(
+            newly_detected_any & (self.target_detected_step < 0),
+            self.world_steps.view(-1, 1).expand_as(self.target_detected_step),
+            self.target_detected_step,
+        )
         self.target_detected |= newly_detected
 
         discover_counts = newly_detected.float().sum(dim=-1)
         per_agent_discovery = self.discovery_reward * discover_counts
+        if self.search_capacity_discovery_bonus > 0:
+            if active_count_before is None:
+                active_count_before = self.active_agents.float().sum(dim=-1)
+            enough_search_capacity = active_count_before >= float(self.discovery_active_agents_threshold)
+            per_agent_discovery = per_agent_discovery + (
+                self.search_capacity_discovery_bonus
+                * discover_counts
+                * enough_search_capacity.float().unsqueeze(-1)
+            )
+        if self.all_targets_detected_bonus > 0:
+            detected_any_after = self.target_detected.any(dim=1)
+            crossed_all_detected = detected_any_after.all(dim=-1) & ~detected_any_before.all(dim=-1)
+            if self.all_targets_detected_bonus_requires_no_rescue:
+                if visited_count_before is None:
+                    visited_count_before = self.target_visited.float().sum(dim=-1)
+                crossed_all_detected = crossed_all_detected & (visited_count_before <= 0)
+            detector_count = newly_detected.float().sum(dim=(1, 2)).clamp_min(1.0)
+            detector_share = newly_detected.float().sum(dim=-1) / detector_count.unsqueeze(-1)
+            per_agent_discovery = per_agent_discovery + (
+                self.all_targets_detected_bonus
+                * crossed_all_detected.float().unsqueeze(-1)
+                * detector_share
+            )
         return per_agent_discovery + entropy_gain / max(float(self.map_dim**2), 1.0)
 
     def _refresh_maps(self, env_index: int | None = None) -> None:

@@ -32,12 +32,17 @@ class HGSARHighLevelPolicy:
         device: str = "cpu",
         deterministic: bool = True,
         actor: HeterogeneousGraphActor | None = None,
+        ego_features: int = 5,
+        target_features: int = 4,
     ) -> None:
         self.n_agents = n_agents
         self.rrt_top_k = rrt_top_k
         self.device = torch.device(device)
         self.deterministic = deterministic
-        self.actor = actor or HeterogeneousGraphActor()
+        self.actor = actor or HeterogeneousGraphActor(
+            ego_features=ego_features,
+            target_features=target_features,
+        )
         self.actor.to(self.device)
         self.actor.eval()
         self.stats = HighLevelPolicyStats()
@@ -136,14 +141,19 @@ class HGSARActorCriticPolicy(torch.nn.Module):
         rrt_top_k: int,
         device: str = "cpu",
         deterministic: bool = False,
+        ego_features: int = 5,
+        target_features: int = 4,
     ) -> None:
         super().__init__()
         self.n_agents = n_agents
         self.rrt_top_k = rrt_top_k
         self.device = torch.device(device)
         self.deterministic = deterministic
-        self.actor = HeterogeneousGraphActor()
-        self.critic = HighLevelMapCritic(n_agents=n_agents, agent_features=5)
+        self.actor = HeterogeneousGraphActor(
+            ego_features=ego_features,
+            target_features=target_features,
+        )
+        self.critic = HighLevelMapCritic(n_agents=n_agents, agent_features=ego_features)
         self.stats = HighLevelPolicyStats()
         self.last_debug: dict[str, Tensor] = {}
         self.to(self.device)

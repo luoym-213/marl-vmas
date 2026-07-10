@@ -15,6 +15,8 @@ the previous color-matched navigation task, landmarks are not assigned to
 specific agents. The team is rewarded when every landmark has at least one
 nearby agent, while agent-agent collisions are penalized.
 
+The default `spread` reward is a shaped VMAS coverage reward. Use `spread_mpe_parity` for the old MPE paper-compatible setup.
+
 The default reward follows the MPE `simple_spread` structure:
 
 ```text
@@ -66,6 +68,7 @@ python3 scripts/inspect_async_smdp.py --num-envs 2 --steps 30 --device cpu
 python3 scripts/train_mappo.py --variant spread --model mlp
 python3 scripts/train_mappo.py --variant spread_early_done --model mlp 
 python3 scripts/train_mappo.py --variant sar_low --model mlp
+python3 scripts/train_mappo.py --variant spread_mpe_parity --model mlp
 ```
 
 For graph policies:
