@@ -47,6 +47,52 @@ class SarScenario(BaseScenario):
         self.staged_rescue = kwargs.pop("staged_rescue", False)
         self.rescue_detected_threshold = kwargs.pop("rescue_detected_threshold", self.n_targets)
         self.rescue_entropy_threshold = kwargs.pop("rescue_entropy_threshold", None)
+        self.dynamic_rescue_release = kwargs.pop("dynamic_rescue_release", False)
+        self.dynamic_release_min_searchers = kwargs.pop(
+            "dynamic_release_min_searchers", 2
+        )
+        self.dynamic_release_entropy_ratio_threshold = kwargs.pop(
+            "dynamic_release_entropy_ratio_threshold", 0.58
+        )
+        self.dynamic_release_entropy_rate_threshold = kwargs.pop(
+            "dynamic_release_entropy_rate_threshold", 0.0015
+        )
+        self.dynamic_release_min_stagnation_step = kwargs.pop(
+            "dynamic_release_min_stagnation_step", 25
+        )
+        self.dynamic_release_search_steps_per_target = kwargs.pop(
+            "dynamic_release_search_steps_per_target", 22.0
+        )
+        self.dynamic_release_speed_per_step = kwargs.pop(
+            "dynamic_release_speed_per_step", 0.035
+        )
+        self.dynamic_release_time_margin = kwargs.pop(
+            "dynamic_release_time_margin", 8.0
+        )
+        self.dynamic_release_max_new_agents_per_event = kwargs.pop(
+            "dynamic_release_max_new_agents_per_event", 1
+        )
+        self.dynamic_rescue_only_after_all_detected = kwargs.pop(
+            "dynamic_rescue_only_after_all_detected", False
+        )
+        self.redecide_on_detection_change = kwargs.pop(
+            "redecide_on_detection_change", False
+        )
+        self.redecide_on_assignment_change = kwargs.pop(
+            "redecide_on_assignment_change", False
+        )
+        self.enable_finder_first_cascade = kwargs.pop(
+            "enable_finder_first_cascade", False
+        )
+        self.finder_cascade_mode = kwargs.pop(
+            "finder_cascade_mode", "immediate"
+        )
+        if self.finder_cascade_mode not in {
+            "finder_only",
+            "immediate",
+            "one_event",
+        }:
+            raise ValueError(f"invalid finder cascade mode: {self.finder_cascade_mode}")
         self.max_steps = kwargs.pop("scenario_max_steps", kwargs.pop("max_steps", 100))
 
         self.world_spawning_x = kwargs.pop("world_spawning_x", 1.0)
@@ -244,6 +290,16 @@ class SarScenario(BaseScenario):
             dtype=torch.long,
             device=device,
         )
+        self.last_new_target_finders = torch.zeros(
+            batch_dim,
+            self.n_agents,
+            self.n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        self.target_first_finder_mask = torch.zeros_like(
+            self.last_new_target_finders
+        )
         self.detected_targets = torch.zeros(batch_dim, self.n_agents, self.n_targets, 4, device=device)
         self.explore_candidates = torch.zeros(
             batch_dim,
@@ -287,6 +343,8 @@ class SarScenario(BaseScenario):
         self.target_detected[batch_slice] = False
         self.target_visited[batch_slice] = False
         self.target_detected_step[batch_slice] = -1
+        self.last_new_target_finders[batch_slice] = False
+        self.target_first_finder_mask[batch_slice] = False
         self.recent_decision_ttl[batch_slice] = 0
         self.recent_rrt_candidate_world[batch_slice] = 0.0
         self.success[batch_slice] = False
@@ -803,9 +861,27 @@ class SarScenario(BaseScenario):
         agent_target_dist = torch.cdist(agent_pos, target_pos)
         active_mask = self.active_agents.unsqueeze(-1)
         detected_any_before = self.target_detected.any(dim=1)
+        self.last_new_target_finders.zero_()
         newly_detected = (agent_target_dist <= self.sensor_radius) & active_mask
         newly_detected = newly_detected & ~self.target_detected
         newly_detected_any = newly_detected.any(dim=1)
+        globally_new = newly_detected_any & ~detected_any_before
+        new_finder_candidates = newly_detected & globally_new.unsqueeze(1)
+        candidate_distances = agent_target_dist.masked_fill(
+            ~new_finder_candidates,
+            torch.inf,
+        )
+        minimum_finder_distance = candidate_distances.min(dim=1).values
+        # Exact geometric ties remain co-finders. Selecting an arbitrary index
+        # would introduce a hidden leader and break permutation consistency.
+        self.last_new_target_finders = (
+            new_finder_candidates
+            & (
+                candidate_distances
+                <= minimum_finder_distance.unsqueeze(1) + 1e-6
+            )
+        )
+        self.target_first_finder_mask |= self.last_new_target_finders
         self.target_detected_step = torch.where(
             newly_detected_any & (self.target_detected_step < 0),
             self.world_steps.view(-1, 1).expand_as(self.target_detected_step),

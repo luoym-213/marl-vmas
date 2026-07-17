@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,9 +29,10 @@ except AttributeError:
     pass
 
 
-DEFAULT_CHECKPOINT = Path(
-    "projects/CommSpread/outputs/sar_low_full/"
-    "low_safe_0.06/checkpoints/checkpoint_50040000.pt"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CHECKPOINT = (
+    PROJECT_ROOT
+    / "outputs/sar_low_full/low_safe_0.06/checkpoints/checkpoint_50040000.pt"
 )
 
 CSV_FIELDS = [
@@ -53,12 +56,48 @@ CSV_FIELDS = [
     "entropy",
     "approx_kl",
     "clip_fraction",
+    "intent_loss",
+    "intent_top1_accuracy",
+    "intent_none_accuracy",
+    "intent_rescue_accuracy",
+    "intent_simultaneous_accuracy",
+    "intent_frequency_baseline_accuracy",
+    "coordination_pressure_mean",
+    "coordination_pressure_max",
+    "coordination_suppressed_target_ratio",
+    "coordination_logit_reduction_mean",
+    "coordination_target_top1_changes",
+    "coordination_gate_near_zero_ratio",
+    "coordination_gate_saturated_ratio",
+    "coordination_utility_abs_max",
+    "rescue_probability_base_mean",
+    "rescue_probability_final_mean",
+    "intention_predicted_none_ratio",
+    "intention_teacher_none_ratio",
+    "intention_teacher_samples",
+    "intention_rescue_samples",
+    "intention_simultaneous_rescue_samples",
+    "intention_rollout_kl_loss",
+    "high_probability_target_conflicts",
+    "mutual_yield_events",
+    "phase_rescue_probability_mean",
+    "phase_rescue_choice_ratio",
 ]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--low-level-checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--enable-low-level-goal-fallback", action="store_true")
+    parser.add_argument("--low-level-goal-near-threshold", type=float, default=0.25)
+    parser.add_argument("--low-level-fallback-gain", type=float, default=2.0)
+    parser.add_argument("--low-level-fallback-stagnation-steps", type=int, default=5)
+    parser.add_argument("--low-level-fallback-progress-epsilon", type=float, default=0.005)
+    parser.add_argument(
+        "--low-level-controller",
+        choices=("checkpoint", "proportional"),
+        default="checkpoint",
+    )
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
     parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--low-level-steps-per-batch", type=int, default=400)
@@ -84,6 +123,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staged-rescue", action="store_true")
     parser.add_argument("--rescue-detected-threshold", type=int, default=2)
     parser.add_argument("--rescue-entropy-threshold", type=float, default=None)
+    parser.add_argument("--dynamic-rescue-release", action="store_true")
+    parser.add_argument("--dynamic-release-min-searchers", type=int, default=2)
+    parser.add_argument("--dynamic-release-entropy-ratio-threshold", type=float, default=0.58)
+    parser.add_argument("--dynamic-release-entropy-rate-threshold", type=float, default=0.0015)
+    parser.add_argument("--dynamic-release-min-stagnation-step", type=int, default=25)
+    parser.add_argument("--dynamic-release-search-steps-per-target", type=float, default=22.0)
+    parser.add_argument("--dynamic-release-speed-per-step", type=float, default=0.035)
+    parser.add_argument("--dynamic-release-time-margin", type=float, default=8.0)
+    parser.add_argument("--dynamic-release-max-new-agents-per-event", type=int, default=1)
+    parser.add_argument("--dynamic-rescue-only-after-all-detected", action="store_true")
+    parser.add_argument("--redecide-on-detection-change", action="store_true")
+    parser.add_argument("--redecide-on-assignment-change", action="store_true")
+    parser.add_argument("--enable-finder-first-cascade", action="store_true")
+    parser.add_argument(
+        "--finder-cascade-mode",
+        choices=("finder_only", "immediate", "one_event"),
+        default="immediate",
+    )
     parser.add_argument("--early-rescue-penalty", type=float, default=0.0)
     parser.add_argument("--early-rescue-detected-threshold", type=int, default=3)
     parser.add_argument("--search-capacity-discovery-bonus", type=float, default=0.0)
@@ -100,11 +157,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unique-rescue-assignment-bonus", type=float, default=0.0)
     parser.add_argument("--duplicate-rescue-assignment-penalty", type=float, default=0.0)
     parser.add_argument("--detected-unassigned-target-penalty", type=float, default=0.0)
+    parser.add_argument("--coordinated-target-selection", action="store_true")
+    parser.add_argument("--enable-commitment-aware-actor", action="store_true")
+    parser.add_argument("--enable-phase-policy", action="store_true")
+    parser.add_argument("--phase-initial-rescue-logit", type=float, default=-1.5)
+    parser.add_argument("--rescue-distance-logit-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--enable-teammate-intention-coordination",
+        action="store_true",
+    )
+    parser.add_argument("--intent-loss-coef", type=float, default=0.1)
+    parser.add_argument("--coordination-beta", type=float, default=0.25)
+    parser.add_argument("--coordination-margin", type=float, default=0.1)
+    parser.add_argument("--coordination-temperature", type=float, default=1.0)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.low_level_controller == "proportional" and args.enable_low_level_goal_fallback:
+        raise ValueError(
+            "low-level goal fallback applies only to the checkpoint controller"
+        )
+    if args.dynamic_rescue_release and args.staged_rescue:
+        raise ValueError("dynamic rescue release cannot be combined with staged rescue")
+    if args.dynamic_rescue_release and args.coordinated_target_selection:
+        raise ValueError(
+            "dynamic rescue release cannot be combined with sequential hard masking"
+        )
+    if args.enable_finder_first_cascade and not args.dynamic_rescue_release:
+        raise ValueError("finder-first cascade requires --dynamic-rescue-release")
+    if args.enable_phase_policy and not args.progress_features:
+        raise ValueError("phase policy requires --progress-features")
+    workspace_root = Path(__file__).resolve().parents[3]
+    try:
+        args.git_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=workspace_root, text=True
+        ).strip()
+        git_diff = subprocess.check_output(
+            ["git", "diff", "--binary"], cwd=workspace_root
+        )
+        args.git_diff_sha256 = hashlib.sha256(git_diff).hexdigest()
+    except (OSError, subprocess.CalledProcessError):
+        args.git_head = "unknown"
+        args.git_diff_sha256 = "unknown"
+    args.command = [sys.executable, *sys.argv]
+    learned_coordination_modes = int(args.enable_commitment_aware_actor) + int(
+        args.enable_teammate_intention_coordination
+    )
+    if learned_coordination_modes > 1:
+        raise ValueError(
+            "commitment-aware actor and teammate intention coordination "
+            "cannot be enabled together"
+        )
+    if args.coordinated_target_selection and learned_coordination_modes:
+        raise ValueError(
+            "sequential hard mask cannot be combined with a learned "
+            "coordination experiment"
+        )
     torch.manual_seed(args.seed)
     args.save_folder.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = args.save_folder / "checkpoints"
@@ -146,6 +256,32 @@ def main() -> None:
         staged_rescue=args.staged_rescue,
         rescue_detected_threshold=args.rescue_detected_threshold,
         rescue_entropy_threshold=args.rescue_entropy_threshold,
+        dynamic_rescue_release=args.dynamic_rescue_release,
+        dynamic_release_min_searchers=args.dynamic_release_min_searchers,
+        dynamic_release_entropy_ratio_threshold=(
+            args.dynamic_release_entropy_ratio_threshold
+        ),
+        dynamic_release_entropy_rate_threshold=(
+            args.dynamic_release_entropy_rate_threshold
+        ),
+        dynamic_release_min_stagnation_step=(
+            args.dynamic_release_min_stagnation_step
+        ),
+        dynamic_release_search_steps_per_target=(
+            args.dynamic_release_search_steps_per_target
+        ),
+        dynamic_release_speed_per_step=args.dynamic_release_speed_per_step,
+        dynamic_release_time_margin=args.dynamic_release_time_margin,
+        dynamic_release_max_new_agents_per_event=(
+            args.dynamic_release_max_new_agents_per_event
+        ),
+        dynamic_rescue_only_after_all_detected=(
+            args.dynamic_rescue_only_after_all_detected
+        ),
+        redecide_on_detection_change=args.redecide_on_detection_change,
+        redecide_on_assignment_change=args.redecide_on_assignment_change,
+        enable_finder_first_cascade=args.enable_finder_first_cascade,
+        finder_cascade_mode=args.finder_cascade_mode,
         early_rescue_penalty=args.early_rescue_penalty,
         early_rescue_detected_threshold=args.early_rescue_detected_threshold,
         search_capacity_discovery_bonus=args.search_capacity_discovery_bonus,
@@ -160,12 +296,24 @@ def main() -> None:
         detected_unassigned_target_penalty=args.detected_unassigned_target_penalty,
     )
     scenario = env.scenario
-    low_policy = BenchMARLLowLevelPolicy(
-        args.low_level_checkpoint,
-        device=args.device,
-        seed=args.seed,
-        deterministic=True,
-        max_steps=scenario.max_steps,
+    low_policy = (
+        BenchMARLLowLevelPolicy(
+            args.low_level_checkpoint,
+            device=args.device,
+            seed=args.seed,
+            deterministic=True,
+            max_steps=scenario.max_steps,
+            enable_goal_reaching_fallback=args.enable_low_level_goal_fallback,
+            goal_near_threshold=args.low_level_goal_near_threshold,
+            fallback_proportional_gain=args.low_level_fallback_gain,
+            fallback_stagnation_steps=args.low_level_fallback_stagnation_steps,
+            fallback_progress_epsilon=args.low_level_fallback_progress_epsilon,
+        )
+        if args.low_level_controller == "checkpoint"
+        else None
+    )
+    low_level_source = (
+        low_policy.source if low_policy is not None else "proportional_gain:2.0"
     )
     high_policy = HGSARActorCriticPolicy(
         n_agents=scenario.n_agents,
@@ -174,6 +322,16 @@ def main() -> None:
         deterministic=False,
         ego_features=9 if args.progress_features else 5,
         target_features=7 if args.target_assignment_features else 4,
+        enable_commitment_aware_actor=args.enable_commitment_aware_actor,
+        enable_phase_policy=args.enable_phase_policy,
+        phase_initial_rescue_logit=args.phase_initial_rescue_logit,
+        rescue_distance_logit_scale=args.rescue_distance_logit_scale,
+        enable_teammate_intention_coordination=(
+            args.enable_teammate_intention_coordination
+        ),
+        coordination_beta=args.coordination_beta,
+        coordination_margin=args.coordination_margin,
+        coordination_temperature=args.coordination_temperature,
     )
     optimizer = torch.optim.Adam(high_policy.parameters(), lr=args.lr)
     start_update = 0
@@ -184,12 +342,29 @@ def main() -> None:
         env,
         high_level_policy=high_policy,
         low_level_policy=low_policy,
+        coordinated_target_selection=args.coordinated_target_selection,
     )
 
     try:
         for update in range(start_update + 1, args.updates + 1):
             high_policy.reset_stats()
             collector.reset()
+            if update == start_update + 1:
+                initial_agents = torch.stack(
+                    [agent.state.pos for agent in scenario.world.agents], dim=1
+                ).detach().cpu().contiguous()
+                initial_targets = torch.stack(
+                    [target.state.pos for target in scenario.targets], dim=1
+                ).detach().cpu().contiguous()
+                initial_layout = torch.cat([initial_agents, initial_targets], dim=1)
+                args.initial_layout_sha256 = hashlib.sha256(
+                    initial_layout.numpy().tobytes()
+                ).hexdigest()
+                args.initial_layout_checksum = float(initial_layout.sum())
+                (texts_dir / "config.json").write_text(
+                    json.dumps(serialize_config(args), indent=2),
+                    encoding="utf-8",
+                )
             initial_entropy = entropy_total(scenario).detach().clone()
             transitions = collector.rollout(args.low_level_steps_per_batch)
             final_entropy = entropy_total(scenario).detach().clone()
@@ -209,13 +384,14 @@ def main() -> None:
                 entropy_coef=args.entropy_coef,
                 value_coef=args.value_coef,
                 max_grad_norm=args.max_grad_norm,
+                intent_loss_coef=args.intent_loss_coef,
             )
             rollout_metrics = summarize_rollout(
                 transitions=transitions,
                 scenario=scenario,
                 initial_entropy=initial_entropy,
                 final_entropy=final_entropy,
-                low_level_source=low_policy.source,
+                low_level_source=low_level_source,
                 actor_metrics=high_policy.metrics(),
             )
             print_update(update, rollout_metrics | update_metrics)
@@ -234,7 +410,8 @@ def main() -> None:
                 latest_checkpoint=checkpoint_dir / "latest.pt",
             )
     finally:
-        low_policy.close()
+        if low_policy is not None:
+            low_policy.close()
 
 
 def transitions_to_batch(
@@ -248,16 +425,30 @@ def transitions_to_batch(
     return {
         "ego_node": stack("ego_node").float(),
         "teammate_nodes": stack("teammate_nodes").float(),
+        "teammate_context_nodes": stack("teammate_context_nodes").float(),
         "teammate_mask": stack("teammate_mask").float(),
         "explore_nodes": stack("explore_nodes").float(),
         "target_nodes": stack("target_nodes").float(),
         "target_mask": stack("target_mask").bool(),
+        "intent_target_mask": stack("intent_target_mask").bool(),
         "map_channels": stack("map_channels").float(),
         "global_map_channels": stack("global_map_channels").float(),
         "global_agent_nodes": stack("global_agent_nodes").float(),
         "explore_edges": stack("explore_edges").float(),
         "target_edges": stack("target_edges").float(),
         "action_mask": stack("action_mask").bool(),
+        "coord_agent_nodes": stack("coord_agent_nodes").float(),
+        "agent_active_mask": stack("agent_active_mask").bool(),
+        "agent_decision_mask": stack("agent_decision_mask").bool(),
+        "agent_commitment_target_id": stack(
+            "agent_commitment_target_id"
+        ).long(),
+        "target_ids": stack("target_ids").long(),
+        "intent_teacher": stack("intent_teacher").float(),
+        "intent_teacher_mask": stack("intent_teacher_mask").bool(),
+        "intent_teacher_simultaneous_mask": stack(
+            "intent_teacher_simultaneous_mask"
+        ).bool(),
         "action": stack("action").long().view(-1),
         "old_log_prob": stack("log_prob").float().view(-1, 1),
         "old_value": stack("value").float().view(-1, 1),
@@ -332,6 +523,7 @@ def ppo_update(
     entropy_coef: float,
     value_coef: float,
     max_grad_norm: float,
+    intent_loss_coef: float,
 ) -> dict[str, float]:
     policy.train()
     n = batch["action"].shape[0]
@@ -343,6 +535,12 @@ def ppo_update(
         "entropy": [],
         "approx_kl": [],
         "clip_fraction": [],
+        "intent_loss": [],
+        "intent_top1_accuracy": [],
+        "intent_none_accuracy": [],
+        "intent_rescue_accuracy": [],
+        "intent_simultaneous_accuracy": [],
+        "intent_frequency_baseline_accuracy": [],
     }
     for _ in range(ppo_epochs):
         permutation = torch.randperm(n, device=batch["action"].device)
@@ -357,7 +555,13 @@ def ppo_update(
             policy_loss = -torch.min(unclipped, clipped).mean()
             value_loss = F.mse_loss(eval_out["value"], minibatch["return"])
             entropy = eval_out["entropy"].mean()
-            loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+            intent_loss = eval_out["intent_loss"]
+            loss = (
+                policy_loss
+                + value_coef * value_loss
+                - entropy_coef * entropy
+                + intent_loss_coef * intent_loss
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -373,6 +577,15 @@ def ppo_update(
             metrics["entropy"].append(float(entropy.detach().cpu()))
             metrics["approx_kl"].append(float(approx_kl.detach().cpu()))
             metrics["clip_fraction"].append(float(clip_fraction.detach().cpu()))
+            for key in [
+                "intent_loss",
+                "intent_top1_accuracy",
+                "intent_none_accuracy",
+                "intent_rescue_accuracy",
+                "intent_simultaneous_accuracy",
+                "intent_frequency_baseline_accuracy",
+            ]:
+                metrics[key].append(float(eval_out[key].detach().cpu()))
 
     return {key: float(torch.tensor(values).mean()) for key, values in metrics.items()}
 
@@ -456,6 +669,23 @@ def print_update(update: int, metrics: dict[str, float | int | str]) -> None:
                     f"entropy {fmt_float(metrics, 'entropy')}  "
                     f"kl {fmt_float(metrics, 'approx_kl')}  "
                     f"clip {fmt_float(metrics, 'clip_fraction')}"
+                ),
+                (
+                    "  intent  | "
+                    f"loss {fmt_float(metrics, 'intent_loss')}  "
+                    f"top1 {fmt_float(metrics, 'intent_top1_accuracy')}  "
+                    f"none {fmt_float(metrics, 'intent_none_accuracy')}  "
+                    f"rescue {fmt_float(metrics, 'intent_rescue_accuracy')}  "
+                    f"sim {fmt_float(metrics, 'intent_simultaneous_accuracy')}"
+                    f"  freq {fmt_float(metrics, 'intent_frequency_baseline_accuracy')}"
+                ),
+                (
+                    "  coord   | "
+                    f"pressure {fmt_float(metrics, 'coordination_pressure_mean')} "
+                    f"(max {fmt_float(metrics, 'coordination_pressure_max')})  "
+                    f"reduction {fmt_float(metrics, 'coordination_logit_reduction_mean')}  "
+                    f"suppressed {fmt_float(metrics, 'coordination_suppressed_target_ratio')}  "
+                    f"mutual_yield {fmt_int(metrics, 'mutual_yield_events')}"
                 ),
             ]
         ),
@@ -561,6 +791,21 @@ def write_run_summary(
         f"value_coef: {args.value_coef}",
         f"lr: {args.lr}",
         f"max_grad_norm: {args.max_grad_norm}",
+        f"coordinated_target_selection: {args.coordinated_target_selection}",
+        f"enable_commitment_aware_actor: {args.enable_commitment_aware_actor}",
+        f"enable_phase_policy: {args.enable_phase_policy}",
+        f"phase_initial_rescue_logit: {args.phase_initial_rescue_logit}",
+        f"rescue_distance_logit_scale: {args.rescue_distance_logit_scale}",
+        f"redecide_on_detection_change: {args.redecide_on_detection_change}",
+        f"redecide_on_assignment_change: {args.redecide_on_assignment_change}",
+        f"enable_finder_first_cascade: {args.enable_finder_first_cascade}",
+        f"finder_cascade_mode: {args.finder_cascade_mode}",
+        f"dynamic_release_max_new_agents_per_event: {args.dynamic_release_max_new_agents_per_event}",
+        f"enable_teammate_intention_coordination: {args.enable_teammate_intention_coordination}",
+        f"intent_loss_coef: {args.intent_loss_coef}",
+        f"coordination_beta: {args.coordination_beta}",
+        f"coordination_margin: {args.coordination_margin}",
+        f"coordination_temperature: {args.coordination_temperature}",
         f"final_update: {final_update}",
         f"latest_checkpoint: {latest_checkpoint}",
         "",
