@@ -1,158 +1,81 @@
-# Decisions
+# CommSpread MARL 设计决策
 
-Generated: 2026-07-10 UTC  
-Git HEAD: `3aaf458e00e25049940996e31b906d4964abc811`  
-Worktree: dirty; decisions are based on current code, reports, and output logs.
+更新日期：2026-07-22 UTC；当前 HEAD：`54c95bd`。本文件明确区分已验证决定、观察和未充分结论。
 
-## Designs To Keep
+## 已确定保留的设计
 
-### Keep `spread_mpe_physics_spawn_parity` as the current spread baseline
+### 1. 正式任务保持 `retire_on_rescue=True`
 
-Status: verified fact / retained design.
+**已验证事实**：no-retire 虽曾得 `.671875`，但改变任务语义。
+**决定**：正式结果和主表一律 retire；no-retire 仅 ceiling。
 
-Evidence:
+### 2. 固定 repaired MAPPO + goal fallback
 
-- Physics/action scale mismatch was directly probed: old VMAS parity moved far slower than MPE; physics parity matches the MPE repeated-action displacement sequence.
-- `physics_spawn_parity` has the best spread matched distance and rare successes among tested spread VMAS parity variants.
-- `physics_objective_diagnosis_report.md` recommends keeping it as base.
+**已验证事实**：固定目标三智能体低层成功 `249/256 = 97.27%`；full-information SAR `254/256 = 99.22%`。
+**决定**：当前高层比较固定该低层与 fallback；不以 auto-resampled 98.4% 叙述部署能力。
 
-Remaining uncertainty:
+### 3. 固定正式比较条件
 
-- It still does not recover paper performance; architecture or objective mismatch remains.
+**已验证事实**：radius .3、LR-only、多个 reward shaping 和 hard stage 未给出稳定改善。
+**决定**：固定 3 UAV/3 targets/100 steps/radius .6、原 reward/网络/PPO、同一低层与成功判定；实验按成对布局单变量比较。
 
-### Keep `retire_on_rescue=True` as formal SAR semantics
+### 4. Finder-only 执行机制作为当前正式策略
 
-Status: verified project constraint / retained design.
+**已验证事实**：旧 checkpoint + finder-only 相对 staggered pooled 512 `128 -> 220`，`+17.969pp`，CI `[14.063,21.875]pp`，两独立 256 集均为正。
+**决定**：保留该机制和旧 checkpoint10；机制显式开启，默认路径不变。
 
-Evidence:
+### 5. checkpoint 选择不看训练 batch 或 latest
 
-- User explicitly confirmed SAR task semantics: after an agent rescues a target and reaches the rescue point, it stops working.
-- No-retire counterfactual improves success but changes task into a different problem.
+**已验证事实**：trained update10/20/30 固定 64 都 26/64；update30 按预注册的 baseline-only/detect-all/failure 规则选出。
+**决定**：任何后续训练先固定验证集与选择规则，再正式配对；禁止 latest 自动替换。
 
-Remaining uncertainty:
+### 6. 只允许用已发现目标做执行分配
 
-- None about semantics. How best to learn under this constraint remains open.
+**已验证事实**：E28 exact visible matching 只使用 globally detected、unvisited、unclaimed targets 和 active/current-decision UAV；无 invalid/nonfinite。
+**决定**：任何集中/精确分配不得读取未发现目标位置。
 
-### Keep SAR radius `0.6` as current debug/curriculum regime
+### 7. 新消融功能默认关闭
 
-Status: retained experimental setup.
+**已验证事实**：`--enable-module-ablation`、coverage 指标均为显式开关，A identity path 已与旧评估 parity 对齐。
+**决定**：保留为评估工具；不能静默改变训练或默认评估行为。
 
-Evidence:
+## 已否定或降优先级的设计
 
-- Radius 0.6 fixed PPO baseline train best `0.5625`, last5 `0.300`, eval `0.34375`.
-- Radius 0.3 after PPO fix remains much weaker: train best `0.125`, last5 `0.05`.
+### 1. finder-first 重训练作为已验证提升：否定
 
-Remaining uncertainty:
+**依据**：old+finder -> trained update30 仅 `+3/512`，CI `[-2.344,3.516]pp`。
+**决定**：不把重训练 checkpoint 替换为正式策略；训练 seed-1 前不扩展该路线。
 
-- The final target may still require radius 0.3; transfer/curriculum effectiveness is untested.
+### 2. 单独精确 matching 作为下一主线：降优先级
 
-### Keep the PPO minibatch indexing fix
+**依据**：D−A `−.78pp`，CI 跨零；虽降低几何 regret/crossing，却没有独立 success 收益。
+**决定**：不单独训练/调参分配器；仅在可靠 all-detected 终局阶段研究它。
 
-Status: verified bug fix.
+### 3. 单独 all-detected gate 作为充分解：否定
 
-Evidence:
+**依据**：C−A `+1.95pp`，CI 跨零；虽将 premature retirement `69.73% -> 0`，却产生 post-detection 过探索。
+**决定**：gate 只能与搜索/终局 handoff 联合考虑。
 
-- Before fix: radius 0.6 best success `0.0625`, last5 `0.025`.
-- After fix: radius 0.6 best success `0.5625`, last5 `0.300`.
-- Code now indexes all tensors whose first dimension matches rollout transition batch size.
+### 4. no-retire、hard sequential mask、reward shaping、LR-only：否定或降级
 
-Remaining uncertainty:
+**依据**：分别改变语义、性能不稳、造成 duplicate/低 success，或无独立改善。
+**决定**：不要与当前主线叠加。
 
-- Other PPO bugs may still exist, but this specific mismatch is fixed.
+### 5. proportional controller 进入核心主表：否定
 
-### Keep assignment diagnostics in evaluator
+**依据**：E28 明确固定 repaired MAPPO；proportional 仅可作低层诊断。
+**决定**：不得混入公平核心比较。
 
-Status: retained tool.
+## 仍不充分的结论
 
-Evidence:
+- **观察**：三通道搜索增加 detect-all、减少覆盖重叠，但 coverage efficiency 略降，且条件 all-detected step 更晚。这个条件均值受困难布局构成影响，不能简单判断搜索速度。
+- **观察**：matching 在 all-detected context 有条件收益（H−C `+4.69pp`、E−F `+10.55pp`）。
+- **推测**：最值得学习的是搜索与终局切换的联合策略，而非独立 assignment 网络。
+- **UNKNOWN**：finder-only 训练 seed-1 是否复现；未来可训练版本能否同时保留三通道覆盖与可靠终局 handoff。
+- **UNKNOWN**：现有 dirty 改动能否拆成无交叉、可审计的小 commits，尚未执行。
 
-- Diagnostics showed target switching is not the dominant failure (`switch_away_actions_mean=0`).
-- Detected-unassigned target steps and duplicate claims explain why reward shaping variants fail.
+## 约束
 
-Remaining uncertainty:
-
-- Assignment diagnostics are heuristic; exact target assignment inferred from assigned goal proximity to targets.
-
-### Keep target assignment features as optional, not default
-
-Status: retained optional feature.
-
-Evidence:
-
-- Features reduce discovery-to-assignment delay (`18.73` to `16.40`) but do not improve success over fixed baseline and increase duplicate claims.
-
-Remaining uncertainty:
-
-- Features may become useful once coordinated target selection prevents duplicate claims.
-
-## Designs Rejected Or Deprioritized
-
-### Do not use `no_retire` as final SAR solution
-
-Status: rejected final design, retained diagnostic.
-
-Evidence:
-
-- No-retire eval success `0.671875` vs retire eval `0.34375`, but violates task definition.
-
-### Hard staged rescue masking is deprioritized
-
-Status: rejected for now.
-
-Evidence:
-
-- Threshold 2 + progress: best `0.375`, last5 `0.2375`.
-- Threshold 3 + progress: best `0.25`, last5 `0.15`.
-- Both are worse than fixed baseline best `0.5625`, last5 `0.300`.
-
-### Search-all-then-rescue heuristic is not a final policy
-
-Status: rejected final design.
-
-Evidence:
-
-- 3-seed success `0.2031 +/- 0.05846`.
-- Detects more targets (`2.714`) but detected-unassigned steps are very high (`136`), meaning rescue starts too late for 100-step horizon.
-
-### Greedy rescue heuristic is not a final policy
-
-Status: rejected final design.
-
-Evidence:
-
-- 3-seed success `0.224 +/- 0.05156`, below fixed HGSAR eval `0.34375`.
-- Fails from both undiscovered targets and known-unvisited targets.
-
-### Bonus-heavy assignment shaping is rejected
-
-Status: rejected specific shaping.
-
-Evidence:
-
-- Eval success `0.140625`.
-- Duplicate assignment excess `6.5625`, far above fixed baseline `1.796875`.
-
-### LR-only fix is rejected
-
-Status: rejected as standalone solution.
-
-Evidence:
-
-- `lr=1e-3` increased early KL/clip but did not improve success; best `0.375`, final `0.1875` in short diagnostic.
-
-### Generic BenchMARL GNN full run is deprioritized until feature parity is checked
-
-Status: not rejected, but blocked/deprioritized.
-
-Evidence:
-
-- GNN smoke passed after PyG dependency fix.
-- First longer seed showed returns around `-38` to `-43`, worse than MLP physics baseline around `-28`.
-
-## Conclusions Still Insufficient
-
-- Whether coordinated per-env target masking plus small latency penalty improves SAR is not tested.
-- Whether a two-stage high-level actor (`search/rescue` mode then candidate) outperforms flat logits is not tested.
-- Whether old paper `entity-mp` can be replicated in current VMAS/BenchMARL stack is not tested.
-- Whether radius 0.6 training can transfer to radius 0.3 is not tested.
-- Exact reproducibility of all experiments is incomplete because current results are from a dirty worktree and many outputs do not record Git diff.
+- 不同时改 reward、网络、低层、物理参数、retire 语义、成功判定或布局。
+- 新实验必须保留逐环境 JSON、配置/命令、layout hash、paired CSV 和 invalid/nonfinite 审计。
+- `D_seed0.json` 是无效审计产物；禁止重新纳入统计。

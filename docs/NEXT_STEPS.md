@@ -1,203 +1,57 @@
-# Next Steps
-
-Generated: 2026-07-10 UTC  
-Git HEAD: `3aaf458e00e25049940996e31b906d4964abc811`  
-Worktree: dirty. Do not start broad multi-seed runs until the current state is committed or archived.
-
-## Priority 0 - Reproducibility Checkpoint
-
-Hypothesis: current results are difficult to reproduce unless code and docs are committed together.
-
-Action:
-
-- Commit code and documentation, or create a patch archive and note untracked output directories.
-- Do not change algorithm behavior in this step.
-
-Success criterion:
-
-- `git status --short` after commit shows either clean tree or only intentionally ignored large outputs.
-
-Failure criterion:
-
-- Important reports/outputs remain untracked with no archival policy.
-
-Expected files:
-
-- Git metadata only, no code changes.
-
-Do not change simultaneously:
-
-- Training hyperparameters, rewards, action masks, model architecture.
-
-## Priority 1 - Coordinated Target Selection For SAR
-
-Hypothesis:
-
-- Reward shaping fails because simultaneous agents can still select the same target. Per-env sequential target masking during action sampling will reduce duplicate claims and make latency shaping meaningful.
-
-Experiment:
-
-- Keep flat policy logits.
-- During high-level action sampling/evaluation, for each env decision batch, sequentially prevent later agents from selecting target actions already selected by earlier active agents.
-- Start without positive unique-assignment bonus.
-- Use `--detected-unassigned-target-penalty 0.0025` or `0.005` only after the mask smoke passes.
-
-Success criteria:
-
-- `duplicate_assignment_excess_mean` below fixed baseline `1.797`.
-- `detected_unassigned_steps_mean` below fixed baseline `60.86`.
-- Deterministic eval success >= fixed baseline `0.34375` or train last5 success > `0.300` without worse deterministic diagnostics.
-
-Failure criteria:
-
-- Duplicate claims remain above baseline.
-- Detected-unassigned steps remain above baseline.
-- Success falls below greedy heuristic range (`~0.224`) after 30 updates.
-
-Expected files:
-
-- `comm_spread/high_level_policy.py` or `comm_spread/async_smdp.py` depending on where sampling mask is implemented.
-- `scripts/analyze_sar_failure_modes.py` if evaluator needs identical coordinated selection behavior.
-- Possibly `scripts/train_high_ppo_sar.py` for CLI flags.
-
-Do not change simultaneously:
-
-- Sensor radius.
-- Low-level checkpoint.
-- Retirement semantics.
-- Actor architecture.
-- Multiple reward shaping terms beyond one small latency penalty.
-
-## Priority 2 - Two-Stage SAR Actor Prototype
-
-Hypothesis:
-
-- A flat action space over RRT candidates and targets under-selects or misallocates rescue. Separating `search` vs `rescue` mode from candidate choice improves phase allocation.
-
-Experiment:
-
-- Add a mode head and candidate head.
-- Compare first without extra shaping to fixed HGSAR baseline.
-- Keep target assignment features optional or enabled only in a controlled variant.
-
-Success criteria:
-
-- Deterministic eval success > `0.34375`.
-- `detected_unassigned_steps_mean` decreases without duplicate excess increase.
-- Entropy does not collapse earlier than fixed baseline.
-
-Failure criteria:
-
-- Mode policy collapses to always search or always rescue.
-- Success below heuristic baselines.
-- PPO KL/clip become unstable or zero from the start.
-
-Expected files:
-
-- `comm_spread/models/hgsar.py`
-- `comm_spread/high_level_policy.py`
-- `scripts/train_high_ppo_sar.py`
-- `scripts/analyze_sar_failure_modes.py`
-
-Do not change simultaneously:
-
-- Reward shaping.
-- Radius.
-- Low-level policy.
-- Batch size/lr.
-
-## Priority 3 - SAR Radius Curriculum
-
-Hypothesis:
-
-- Training at radius 0.6 learns useful high-level rescue behavior that can transfer to radius 0.3 better than starting at 0.3 from scratch.
-
-Experiment:
-
-- Start from best valid radius 0.6 checkpoint.
-- Resume/fine-tune with `--sensor-radius 0.3`.
-- Compare to radius 0.3 from-scratch fixed PPO baseline.
-
-Success criteria:
-
-- Radius 0.3 eval success > current from-scratch eval `0.03125` and train best > `0.125`.
-- Detected targets and visited targets improve together.
-
-Failure criteria:
-
-- Fine-tuning collapses target actions or reduces detection.
-- Improvements are only stochastic training spikes with worse deterministic eval.
-
-Expected files:
-
-- Probably no code changes; only commands and outputs.
-
-Do not change simultaneously:
-
-- Reward shaping.
-- Actor features.
-- Low-level checkpoint.
-
-## Priority 4 - Spread Entity/Message-Passing Parity Audit
-
-Hypothesis:
-
-- Existing BenchMARL GNN is not equivalent to old paper `entity-mp`; feature construction/topology mismatch explains poor GNN early returns.
-
-Experiment:
-
-- Inspect old `entity-mp` model inputs and compare to current BenchMARL GNN entity features.
-- Build a parity checklist before running long GNN training.
-- If mismatch is found, implement closer old MPNN feature path or adapter.
-
-Success criteria:
-
-- Documented equivalence or concrete mismatch list.
-- One full seed of corrected GNN beats MLP physics-spawn baseline reward/matched distance.
-
-Failure criteria:
-
-- Existing GNN remains around `-38` to `-43` returns while MLP physics-spawn is around `-28`.
-
-Expected files:
-
-- `comm_spread/models/` or BenchMARL model config path, depending on audit.
-- `scripts/train_mappo.py` only if a new model option is needed.
-- New report under `projects/CommSpread/` or `docs/`.
-
-Do not change simultaneously:
-
-- Spread physics config.
-- PPO profile.
-- Reward normalization.
-
-## Priority 5 - Spread Full GNN Seed Only After Audit
-
-Hypothesis:
-
-- If entity features are correct, message passing may recover spread performance better than MLP.
-
-Experiment:
-
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/train_mappo.py   --variant spread_mpe_physics_spawn_parity   --model gnn   --comms-radius 1.0   --train-device cuda:0   --sampling-device cuda:0   --seed 0   --max-n-frames 3000000   --save-folder projects/CommSpread/outputs/physics_spawn_gnn/seed_0   --no-render
-```
-
-Success criteria:
-
-- Matched distance below `0.55` and success materially above current rare-success baseline.
-- Reward not stuck around `-38` to `-43` early.
-
-Failure criteria:
-
-- Early return remains much worse than MLP physics-spawn baseline.
-
-Expected files:
-
-- No code changes if audit passes.
-
-Do not change simultaneously:
-
-- Physics variant.
-- PPO profile.
-- Global critic variant.
+# CommSpread 下一步实验计划
+
+更新日期：2026-07-22 UTC。所有 P0–P3 固定：3 UAV、3 targets、100 steps、radius .6、`retire_on_rescue=True`、repaired MAPPO + fallback、旧 checkpoint10、同一 reset 顺序、相同 seed-0/seed-1 独立 256 布局；不改 reward、网络、物理或成功判定。每项只验证一个主要假设。
+
+## P0 — 对 E28 结果做纯离线逐环境归因（不改策略代码）
+
+- **单一假设**：搜索改进的 detect-all 收益不是仅由条件样本构成变化造成，且可用 coverage/trajectory 指标解释。
+- **动作**：用 A/B/E/F/G/H 的逐环境 JSON、coverage CSV、paired CSV，按 success、detect-all、failure category 分层；计算 coverage/overlap/efficiency、option switching、detection step 与 completion 的 paired 差异/相关。
+- **成功判据**：能说明三通道的增益主要在哪类布局/失败转移发生，并报告条件化与无条件化结果；不把相关写成因果。
+- **失败判据**：现有字段无法支持分层或结论完全由少数环境驱动；则明确记录不可判定。
+- **预计文件**：新增离线分析脚本和 `outputs/.../module_ablation_20260718/` 报告附件；不改环境/策略代码。
+- **不要同时改变**：任何 policy、checkpoint、布局、评估器语义。
+
+## P1 — 可训练的搜索—终局 handoff 最小单变量原型
+
+- **单一假设**：若保持 finder-only 执行、只向高层提供一个可观测的终局阶段信号/训练约束，可在不替换搜索和分配的前提下降低 premature retirement 与 post-detection over-exploration。
+- **前置条件**：先完成 P0，并在代码审阅中确定一个唯一、可观察、默认关闭的实现方案；当前具体实现为 **UNKNOWN**，不得同时加入三通道、精确 matching 或 reward shaping。
+- **成功判据**：固定 64 checkpoint/策略 smoke 无 invalid/nonfinite；随后 paired 256 的 success/detect-all 不低于 A，且 premature retirement 或 post-detection over-exploration 明确下降。
+- **失败判据**：只降低 retirement 而 success 无提升、引入 search starvation、或 CI 不能排除有害方向。
+- **预计文件**：可能涉及 `async_smdp.py`、`high_level_policy.py`、`train_high_ppo_sar.py`、`analyze_sar_failure_modes.py`；开始前必须单独设计并获确认。
+- **不要同时改变**：reward、低层、RRT 参数、assignment matching、finder mode、layout/horizon。
+
+## P2 — 训练 seed-1 复现 finder-only（仅在需要复核训练结论时）
+
+- **单一假设**：finder-only 重训练没有可靠额外收益这一结论可在独立训练 seed 复现。
+- **动作**：完整复制 E26，仅训练 seed 改为 1；固定 64 选 checkpoint，再在独立 256 配对评估 old+finder vs trained+finder。
+- **成功判据**：若额外训练效应在 seed1 和 pooled 上有正 CI，才重开“retraining”路线；若仍 CI 跨零/为负，正式排除其额外收益。
+- **失败判据**：训练不稳定、配置与 E26 不可比、或未按预注册 checkpoint 规则。
+- **预计文件**：无算法文件；新增 `outputs/sar_high_hgsar_finder_first_finder_only_repaired_mappo_sensor_0.60/seed_1/` 及评估结果。
+- **不要同时改变**：cascade mode、网络、PPO、reward、动态 gate、低层、评估布局。
+
+## P3 — 精确 matching 的终局阶段诊断/约束（仅在 P1 显示稳定终局后）
+
+- **单一假设**：exact matching 的条件收益来自 all-detected 后的分配质量，而不是 hidden-information 泄漏或评价器副作用。
+- **动作**：固定搜索和 timing；只比较 commitment 与 exact visible matching，使用全部已发现目标、active/current-decision UAV，保留 assignment/crossing/regret/visit delay。
+- **成功判据**：paired 256 中 assignment 的正效应 CI 不跨零，duplicate/invalid/nonfinite 保持 0，且不增加未发现失败。
+- **失败判据**：收益只在脚本化 oracle 中存在，或依赖改变搜索/时机；则不进入学习式策略。
+- **预计文件**：优先评估/离线脚本；若 P1 后才需修改，可能为 `sar_module_ablation.py` 和 evaluator，默认关闭。
+- **不要同时改变**：搜索模块、all-detected gate、reward、低层、任务数量。
+
+## P4 — 将三通道视为参考，而非立即替换部署策略
+
+- **单一假设**：三通道的低 overlap/高 detect-all 可被可训练搜索表征或目标选择机制部分复现。
+- **动作**：仅在 P0/P1 完成后，定义一个单一训练变量（例如搜索 option continuity 或可观察 coverage feature）；先 64 smoke，再 paired 256。
+- **成功判据**：detect-all/coverage 改善并有 success 正向证据，且不同时偷偷改变 timing/assignment。
+- **失败判据**：仅复现覆盖而不改善 success，或造成低层 residual failure 增加。
+- **预计文件**：目前具体文件为 **UNKNOWN**；需设计确认后再写。
+- **不要同时改变**：finder-only、all-detected gate、exact matching、reward shaping。
+
+## P5 — 归档与提交
+
+- **单一假设**：结果可以从独立 commit、配置和产物复核。
+- **动作**：先提交文档交接；再单独审阅/提交消融实现与报告脚本；不混入旧报告、`old_algo/`、外部项目目录或 `outputs/` 大量产物。
+- **成功判据**：每个 commit 的主题单一、`git diff --check` 通过，docs 记录准确 HEAD/dirty 状态/产物路径。
+- **失败判据**：把算法、旧实验、输出和文档混在一个不可审计 commit。
+- **预计文件**：本轮仅 `docs/PROJECT_STATUS.md`、`docs/EXPERIMENT_LOG.md`、`docs/DECISIONS.md`、`docs/NEXT_STEPS.md`。
+- **不要同时改变**：任何算法、训练、评估设置。

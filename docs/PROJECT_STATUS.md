@@ -1,171 +1,133 @@
-# Project Status
+# CommSpread MARL 项目状态与会话交接
 
-Generated: 2026-07-10 UTC  
-Project: `projects/CommSpread/`  
-Git branch: `comm`  
-Git HEAD: `3aaf458e00e25049940996e31b906d4964abc811`  
-Worktree state: dirty; many experiment reports/outputs are untracked. Results below are from the current workspace state, not a clean committed artifact.
+生成日期：2026-07-22 UTC
+Git 根目录：`/workspace`；项目目录：`projects/CommSpread/`
+分支：`research/dynamic-search-rescue-release-20260716`；当前 HEAD：`54c95bd0fbb30312a744bc37b0c08a8c351c2974`
 
-## Current Research Goal And Problem Definition
+## 证据等级
 
-Verified facts:
+- **已验证事实**：当前代码、配置、训练 CSV、评估 JSON/CSV 或配对报告直接支持。
+- **观察结果**：已测量描述，不能自动解释因果。
+- **推测**：尚未充分验证的机制解释。
+- **待验证假设**：后续单变量实验要检验的命题。
+- **UNKNOWN**：当前仓库与保存产物不能确认。
 
-- The project is a multi-agent reinforcement learning migration/debugging project for CommSpread/SAR tasks.
-- The old successful paper implementation is under `projects/CommSpread/old_algo/` and was based on MPE.
-- The current implementation uses VMAS/BenchMARL plus local high-level SAR PPO code.
-- The main research question is why the VMAS reimplementation does not recover the paper-level behavior, and how to restore performance while keeping the intended task semantics.
+在 `/workspace` 及 `projects/CommSpread/` 下未找到可读取的 `AGENTS.md`；项目级附加指引为 **UNKNOWN**。
 
-Current active focus:
+## 1. 研究目标与问题定义
 
-- Spread/MPE parity: keep `spread_mpe_physics_spawn_parity` as the current best VMAS parity baseline. Physics/action scale mismatch has been verified and fixed, but success remains weak.
-- Hierarchical SAR: use `sensor_radius=0.6` as the current curriculum/debug regime and keep `retire_on_rescue=True`. The formal SAR semantics are that an agent retires after reaching a rescue target; `no_retire` is diagnostic only.
+### 已验证事实
 
-Known problem shape:
+- 当前主线是 VMAS SAR 分层多智能体任务：3 UAV、3 targets、100 steps、`sensor_radius=0.6`。
+- 正式任务语义为 `retire_on_rescue=True`；`no_retire` 只能作上限诊断，不能混入正式比较。
+- 高层 HGSAR 在 RRT 搜索节点和已发现 target 救援动作之间选择；固定 repaired MAPPO 低层执行目标，并启用 goal fallback。
+- 当前部署候选是**旧 high-level checkpoint** `outputs/sar_high_hgsar_dynamic_staggered_repaired_mappo_sensor_0.60/seed_0/checkpoints/checkpoint_10.pt` 加 finder-only 执行机制，不是 finder-first 重训练 checkpoint。
+- 部署匹配的低层证据是固定目标三智能体成功 `249/256 = 97.27%`，full-information SAR `254/256 = 99.22%`。auto-resampled goals 的约 98.4% 不可作部署一致成功率。
 
-- Spread still has near-zero success even after physics/spawn parity; likely remaining issues are architecture/entity-message-passing mismatch or deeper objective mismatch.
-- SAR high-level policy can learn after fixing PPO minibatch indexing, but deterministic success remains low and failures are dominated by detected targets staying unassigned too long.
+当前问题是：旧 checkpoint + finder-only 在两套独立 256 布局上为 `220/512 = 42.97%`，而三通道搜索 + 全发现 gate + 精确匹配为 `328/512 = 64.06%`；需定位学习式搜索、切换时机、任务分配及其交互造成的差距。
 
-## Current Algorithm And Training Flow
+## 2. 当前算法和训练/评估流程
 
-Verified facts:
+1. `sar_scenario.py` 维护 belief map、目标检测/访问/认领、active/retired UAV、RRT candidates 与奖励。
+2. `AsyncSMDPCollector` 在 option 完成、检测变化、assignment 变化或 cascade 事件时请求高层新决策。
+3. `HGSARActorCriticPolicy` 包装 HGSAR actor/map critic；动作是 RRT search nodes 或 target nodes。
+4. event-driven staggered release 每事件最多新增一个 rescue commitment，已承诺 UAV 使用 latch；检测/assignment change 都触发重决策。
+5. finder-only 在新目标发现时先向 finder 开放，拒绝/不可用/窗口耗尽才扩散；只使用可观测状态，默认关闭。
 
-- Spread training entrypoint: `projects/CommSpread/scripts/train_mappo.py`.
-- Spread task variants are defined in `projects/CommSpread/comm_spread/training_config.py` and mirrored by YAML configs under `projects/CommSpread/configs/`.
-- SAR high-level training entrypoint: `projects/CommSpread/scripts/train_high_ppo_sar.py`.
-- SAR deterministic failure/evaluator entrypoint: `projects/CommSpread/scripts/analyze_sar_failure_modes.py`.
-- SAR low-level policy checkpoint currently used by default:
-  `projects/CommSpread/outputs/sar_low_full/low_safe_0.06/checkpoints/checkpoint_50040000.pt`.
+历史 finder-first seed-0 训练配置已保存：16 env、30 updates、400 low-level steps/batch；PPO `lr=3e-4`、`gamma=.99`、`gae_lambda=.95`、`clip_eps=.2`、4 epochs、minibatch 64，且固定 repaired MAPPO + fallback。2026-07-17 完成，update-30 batch success `5/16`，该训练曲线不用于 checkpoint 或泛化选择。
 
-SAR flow:
+固定 64 环境仅用于预先确定的 checkpoint 筛选；正式验证使用 seed-0 256、seed-1 256、pooled 512 的逐环境配对布局。两套正式布局和 64 筛选集的 per-environment layout hash 均无交集。
 
-1. VMAS SAR scenario provides belief maps, target detection, RRT candidates, target masks, and retirement state.
-2. `BenchMARLLowLevelPolicy` loads the fixed low-level checkpoint and tracks assigned high-level goals.
-3. `AsyncSMDPCollector` asynchronously asks the high-level actor for RRT exploration or target rescue actions.
-4. `HGSARActorCriticPolicy` uses a heterogeneous graph actor and map critic.
-5. `train_high_ppo_sar.py` trains the high-level policy with standalone PPO and saves `checkpoints/latest.pt`, `scalars/train.csv`, and `texts/config.json`.
-6. `analyze_sar_failure_modes.py` evaluates trained policies and heuristic baselines with assignment diagnostics.
+## 3. 已实现模块
 
-## Implemented Modules
+### 已验证并保留
 
-Verified from code/diff:
+- repaired MAPPO goal fallback、SAR PPO minibatch indexing 修复。
+- 动态 release、检测/assignment event 重决策、staggered commitment、commitment latch、finder cascade。
+- 逐环境失败诊断、assignment quality/crossing/finder event 日志。
+- default-off 高层模块消融：`three_lane` 搜索、`all_detected` 时机 gate、仅对已发现且未访问/未认领目标的 exact visible matching。
+- 覆盖诊断：每 UAV 探索面积、团队覆盖、重叠/重复访问、搜索路程、coverage efficiency、option switches、轨迹连续性。
 
-- Spread MPE parity support in `comm_spread/scenario.py`:
-  - `reward_mode=mpe_parity`
-  - MPE-style discrete action mapping and force scaling
-  - matched-distance reward via Hungarian assignment/fallback exhaustive solver
-  - global critic state emission
-  - independent MPE-style spawn option
-  - physics parameters for substeps, drag, dt, collision force, contact margin
-- Spread BenchMARL task support in `comm_spread/benchmarl_task.py`:
-  - `GlobalStateFromAgentInfo`
-  - reward return normalization transform for old-PPO diagnostic
-- SAR high-level features in `comm_spread/async_smdp.py` and `comm_spread/sar_scenario.py`:
-  - progress features: detected/visited/active/entropy
-  - target assignment features: claim count, nearest active-agent distance, detected age
-  - staged rescue mask options
-  - soft rescue timing and assignment shaping reward options
-- SAR diagnostics in `scripts/analyze_sar_failure_modes.py`:
-  - HGSAR checkpoint evaluation
-  - heuristic baselines: `rescue_greedy`, `search_all_then_rescue`, `target_first`, `search_then_target`
-  - assignment metrics: detected-unassigned steps, duplicate claims, discovery-to-assignment delay, assignment-to-visit delay, switch-away actions, success step
-- SAR PPO fix in `scripts/train_high_ppo_sar.py`:
-  - `index_batch()` now indexes every tensor whose first dimension equals the rollout transition batch size.
+### 尚未提交的当前实现
 
-## Current Code Entrypoints And Key Files
+- `comm_spread/sar_module_ablation.py`：评估 wrapper、确定性三通道与 exact visible matching。
+- `scripts/analyze_sar_failure_modes.py`：默认关闭的 module-ablation/coverage CLI、invalid/nonfinite、rejected-target wait。
+- `scripts/report_sar_module_ablation.py`：逐环境 JSON 的配对 2×2×2 汇总。
 
-Core files:
+这些尚未单独审阅/提交；除消融评估外，不应宣称已进入训练或生产执行路径。
 
-- `projects/CommSpread/comm_spread/scenario.py`: VMAS CommSpread/Spread scenario and MPE parity behavior.
-- `projects/CommSpread/comm_spread/sar_scenario.py`: SAR VMAS scenario, belief/detection/reward/retirement logic.
-- `projects/CommSpread/comm_spread/async_smdp.py`: asynchronous SAR high-level collector and observation construction.
-- `projects/CommSpread/comm_spread/high_level_policy.py`: HGSAR actor-critic wrapper and dimensions for optional features.
-- `projects/CommSpread/comm_spread/models/hgsar.py`: heterogeneous graph actor and map critic model definitions.
-- `projects/CommSpread/comm_spread/env_factory.py`: VMAS environment constructors and SAR defaults.
-- `projects/CommSpread/comm_spread/training_config.py`: BenchMARL task variants.
-- `projects/CommSpread/scripts/train_mappo.py`: Spread/MAPPO training CLI.
-- `projects/CommSpread/scripts/train_high_ppo_sar.py`: SAR high-level PPO training CLI.
-- `projects/CommSpread/scripts/analyze_sar_failure_modes.py`: SAR evaluator and baseline comparator.
-- `projects/CommSpread/scripts/probe_spread_mpe_physics.py`: spread physics/action mapping probe.
+## 4. 代码入口和关键文件
 
-Important reports already in project root:
+- `comm_spread/sar_scenario.py`：环境语义。
+- `comm_spread/async_smdp.py`：异步决策、release、cascade、transition。
+- `comm_spread/high_level_policy.py` 与 `comm_spread/models/hgsar.py`：高层 actor-critic。
+- `comm_spread/low_level_policy.py`：固定低层 checkpoint/fallback。
+- `scripts/train_high_ppo_sar.py`：训练 CLI；`scripts/analyze_sar_failure_modes.py`：评估与诊断。
+- `scripts/compare_sar_paired_results.py`：paired success/CI；`scripts/report_sar_module_ablation.py`：消融报告。
 
-- `projects/CommSpread/information_structure_report.md`
-- `projects/CommSpread/physics_objective_diagnosis_report.md`
-- `projects/CommSpread/entity_message_passing_progress_report.md`
-- `projects/CommSpread/sar_radius_0_6_training_audit.md`
-- `projects/CommSpread/sar_radius_0_6_baseline_comparison.md`
+## 5. 最可靠的运行命令
 
-## Most Reliable Current Commands
-
-Spread physics probe:
+### 当前正式策略：旧 checkpoint + finder-only
 
 ```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/probe_spread_mpe_physics.py --variant spread_mpe_physics_spawn_parity --device cuda:0
+PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/analyze_sar_failure_modes.py \
+  --high-level-checkpoint outputs/sar_high_hgsar_dynamic_staggered_repaired_mappo_sensor_0.60/seed_0/checkpoints/checkpoint_10.pt \
+  --low-level-controller checkpoint --enable-low-level-goal-fallback \
+  --num-envs 256 --steps 100 --max-steps 100 --sensor-radius 0.6 --seed 0 --device cuda:0 \
+  --dynamic-rescue-release --dynamic-rescue-only-after-all-detected \
+  --redecide-on-detection-change --redecide-on-assignment-change \
+  --dynamic-release-max-new-agents-per-event 1 \
+  --enable-finder-first-cascade --finder-cascade-mode finder_only \
+  --output <result.json> --csv-output <result.csv> --markdown <result.md>
 ```
 
-Spread current baseline smoke/training command surface:
+seed 1 时只改 `--seed` 和输出路径；不得改 checkpoint、horizon、传感器、低层或 reset 顺序。完整 2×2×2 消融命令/配置见 `outputs/hierarchical_sar_diagnostics/module_ablation_20260718/experiment_config_and_commands.json`。
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/train_mappo.py   --variant spread_mpe_physics_spawn_parity   --model mlp   --train-device cuda:0   --sampling-device cuda:0   --seed 0   --max-n-frames 3000000   --save-folder projects/CommSpread/outputs/physics_spawn_parity/seed_0   --no-render
-```
+## 6. 当前可靠结果
 
-Spread GNN smoke command that has passed:
+### Finder-only 正式验证（已验证事实）
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/train_mappo.py   --variant spread_mpe_physics_spawn_parity   --model gnn   --comms-radius 1.0   --train-device cuda:0   --sampling-device cuda:0   --seed 0   --max-n-frames 1000   --save-folder projects/CommSpread/outputs/gnn_physics_smoke/seed_0   --no-render
-```
+| 集合 | staggered -> old checkpoint + finder-only | 提升 | candidate-only / baseline-only | 95% CI |
+|---|---:|---:|---:|---:|
+| seed-0 256 | 66 -> 114 | +18.750pp | 57 / 9 | [12.891, 24.609]pp |
+| seed-1 256 | 62 -> 106 | +17.188pp | 50 / 6 | [11.719, 22.656]pp |
+| pooled 512 | 128 -> 220 | +17.969pp | 107 / 15 | [14.063, 21.875]pp |
 
-SAR current fixed high-level baseline training:
+finder-first 重训练 update 30 相对 old+finder 为 `+3/512 = +0.586pp`，95% CI `[-2.344, 3.516]pp`；额外训练收益尚未验证。
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/train_high_ppo_sar.py   --device cuda:0   --seed 0   --num-envs 16   --updates 30   --low-level-steps-per-batch 400   --minibatch-size 64   --sensor-radius 0.6   --save-folder projects/CommSpread/outputs/sar_high_hgsar_indexfix_sensor_0.60/seed_0
-```
+### 2×2×2 高层模块消融（已验证事实）
 
-SAR fixed baseline evaluator:
+基准 A（旧 checkpoint + finder-only）`220/512 = 42.97%`；完整脚本化 E `328/512 = 64.06%`，总提升 `+21.09pp`，95% CI `[+16.02,+26.17]pp`。
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/analyze_sar_failure_modes.py   --device cuda:0   --seed 0   --num-envs 64   --steps 300   --sensor-radius 0.6   --policy hgsar   --high-level-checkpoint projects/CommSpread/outputs/sar_high_hgsar_indexfix_sensor_0.60/seed_0/checkpoints/latest.pt   --output projects/CommSpread/outputs/hierarchical_sar_diagnostics/failure_hgsar_0.60_assignment.json   --csv-output projects/CommSpread/outputs/hierarchical_sar_diagnostics/failure_hgsar_0.60_assignment.csv   --markdown projects/CommSpread/failure_hgsar_0.60_assignment.md
-```
+| 单模块 | Success 差异 | 95% CI | 观察 |
+|---|---:|---:|---|
+| B−A：三通道搜索 | +4.10pp | [−0.59,+8.98]pp | detect-all +13.09pp，覆盖 +.0213，重叠 −.0665 |
+| C−A：all-detected 时机 | +1.95pp | [−1.76,+5.66]pp | premature retirement 69.73% -> 0 |
+| D−A：精确匹配 | −0.78pp | [−2.15,+0.59]pp | 几何 regret/crossing 降低，但独立 success 无收益 |
 
-SAR heuristic baseline comparison commands:
+单模块之和 `+5.27pp`，总效应 `+21.09pp`，交互残差 `+15.82pp`（95% CI `[+10.16,+21.68]pp`）；已因此补完 F/G/H 双模块 cell。
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/analyze_sar_failure_modes.py   --device cuda:0 --seed 0 --num-envs 64 --steps 300 --sensor-radius 0.6   --policy rescue_greedy   --output projects/CommSpread/outputs/hierarchical_sar_diagnostics/baseline_rescue_greedy_seed0_0.60.json   --csv-output projects/CommSpread/outputs/hierarchical_sar_diagnostics/baseline_rescue_greedy_seed0_0.60.csv   --markdown projects/CommSpread/sar_baseline_rescue_greedy_seed0_0.60.md
-```
+## 7. 已知问题与未完成任务
 
-```bash
-PYTHONPATH=projects/CommSpread python projects/CommSpread/scripts/analyze_sar_failure_modes.py   --device cuda:0 --seed 0 --num-envs 64 --steps 300 --sensor-radius 0.6   --policy search_all_then_rescue   --output projects/CommSpread/outputs/hierarchical_sar_diagnostics/baseline_search_all_then_rescue_seed0_0.60.json   --csv-output projects/CommSpread/outputs/hierarchical_sar_diagnostics/baseline_search_all_then_rescue_seed0_0.60.csv   --markdown projects/CommSpread/sar_baseline_search_all_then_rescue_seed0_0.60.md
-```
+### 已验证事实
 
-## Current Known Issues
+- A 的主失败是未发现全部目标：225/512；detect-all 后未完成为 67/512。E 将未发现降为 24/512，但 detect-all 后未完成增至 160/512，瓶颈转移到终局救援。
+- finder-only A 有 357/512（69.73%）发生 premature retirement；all-detected gate 为 0。
+- A pooled accept/reject/unavailable `1236/320/102`；297 个拒绝目标后来被认领，平均等待 34.67 步、P95 72。
+- 正式 exact matching cells 的 duplicate、invalid、nonfinite 均为 0。`D_seed0.json` 是 stale target action 的无效审计产物；统计只使用 `D_v2_seed0/1`。
 
-Verified facts:
+### 观察结果
 
-- The current worktree is not clean. Results are based on uncommitted code changes.
-- Spread physics parity is necessary but not sufficient: `spread_mpe_physics_spawn_parity` gives rare success only, still below 1% in reported 3M-frame runs.
-- Existing BenchMARL GNN path is technically unblocked after installing PyG dependencies, but early GNN full seed was worse than MLP physics baseline and was stopped early.
-- SAR fixed baseline at `sensor_radius=0.6` improves after PPO indexing fix, but deterministic eval still only reaches `success_rate=0.34375` on 64 envs.
-- SAR reward shaping variants so far often reduce discovery-to-assignment delay but increase duplicate target claims or detected-unassigned time.
-- Learned policies can show high stochastic training peaks but weaker deterministic evaluator performance.
+- 三通道提高 detect-all 且降低重叠；已 detect-all 的条件样本中 all-detected step 更晚，可能是额外纳入困难布局的组成效应。
+- exact matching 在 all-detected 稳定终局阶段有条件收益（H−C `+4.69pp`，E−F `+10.55pp`），finder timing 下无独立收益。
 
-Observed results:
+### 推测与待验证假设
 
-- Greedy rescue heuristic: success `0.224 +/- 0.05156`, success step `66.89 +/- 3.083`.
-- Search-all-then-rescue heuristic: success `0.2031 +/- 0.05846`, success step `70.52 +/- 2.934`, detected `2.714`, detected-unassigned steps `136`.
-- Fixed HGSAR baseline eval: success `0.34375`, success step `64.27`, detected-unassigned steps `60.86`.
+- 下一瓶颈更可能是学习式搜索和可靠终局 handoff 的耦合，而非单独 assignment 学习。
+- 把三通道/gate 的有效交互转化为可训练高层策略仍待验证。
 
-Hypotheses not yet fully validated:
+### UNKNOWN
 
-- Coordinated target selection during action sampling may be required before reward shaping can help.
-- A two-stage high-level actor (`search` vs `rescue`, then candidate selection) may be a better structural fix than scalar reward shaping.
-- Spread recovery may require closer old `entity-mp` feature/model parity rather than BenchMARL generic GNN.
-
-## Unfinished Tasks
-
-- Implement and test coordinated per-env target masking for simultaneous SAR high-level decisions.
-- Run multi-seed SAR training for any shaping variant that first passes deterministic diagnostic criteria.
-- Decide whether target assignment features should remain optional or become part of the main actor interface.
-- Implement or verify a closer old paper entity/message-passing policy for spread.
-- Re-run spread GNN only after checking entity feature parity.
-- Clean up or commit current untracked reports/outputs; exact archival policy is UNKNOWN.
-- Create reproducible experiment runner scripts for 3-seed comparisons; currently many commands are manual.
+- finder-only 的独立训练 seed-1 复现。
+- 多数历史实验运行时的完整、唯一 dirty diff。
+- 当前混合工作树的理想 commit 拆分。
