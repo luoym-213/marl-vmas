@@ -32,7 +32,7 @@ DEFAULT_LOW_CHECKPOINT = (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--low-level-checkpoint", type=Path, default=DEFAULT_LOW_CHECKPOINT)
     parser.add_argument("--enable-low-level-goal-fallback", action="store_true")
@@ -142,7 +142,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--enable-coverage-metrics", action="store_true")
     parser.add_argument("--coverage-metrics-output", type=Path, default=None)
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 class RescueGreedyPolicy:
@@ -443,7 +447,11 @@ def assignment_quality_snapshot(
 
 
 @torch.no_grad()
-def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], dict[str, float | int | str]]:
+def run(
+    args: argparse.Namespace,
+    *,
+    high_level_policy: Any | None = None,
+) -> tuple[list[dict[str, float | int | str]], dict[str, float | int | str]]:
     all_detected_ablation = (
         args.enable_module_ablation
         and args.ablation_timing_module == "all_detected"
@@ -519,11 +527,16 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
             fallback_proportional_gain=args.low_level_fallback_gain,
             fallback_stagnation_steps=args.low_level_fallback_stagnation_steps,
             fallback_progress_epsilon=args.low_level_fallback_progress_epsilon,
+            task_variant=getattr(args, "low_level_task_variant", "sar_low"),
         )
         if args.low_level_controller == "checkpoint"
         else None
     )
-    high_policy = build_policy(args, scenario)
+    high_policy = (
+        high_level_policy
+        if high_level_policy is not None
+        else build_policy(args, scenario)
+    )
     collector = AsyncSMDPCollector(
         env,
         high_level_policy=high_policy,
