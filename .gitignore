@@ -13,3 +13,26 @@ projects/CustormVmasBenchmarl/outputs/
 
 projects/CustormVmasBenchmarl/mappo_navigation_mlp__*/
 
+# Local editor state and repository-internal verification worktrees
+
+/.qoder/
+/.worktrees/
+
+# Local experiment outputs and logs
+
+/outputs/
+/projects/logs/
+
+# External/reference project copies (not part of marl-vmas)
+
+/projects/comm_limited_vmas/
+/projects/official_baseline/
+/projects/CommSpread/old_algo/
+
+# Generated CommSpread experiment reports kept locally
+
+/projects/CommSpread/failure_hgsar_*.md
+/projects/CommSpread/sar_ceiling_*.md
+/projects/CommSpread/sar_low_goal_reaching_diagnosis.md
+/projects/CommSpread/sar_rescue_timing_*.md
+/projects/CommSpread/sar_teammate_intention_coordination_report.md
