@@ -332,6 +332,8 @@ def main() -> None:
     if chapter1 is not None:
         if not args.run_id:
             raise ValueError("strict Chapter 1 training requires --run-id")
+        if args.resume_checkpoint is not None:
+            raise ValueError("strict Chapter 1 training requires random high-level initialization; resume is disabled")
         if args.validation_every_updates <= 0 or args.validation_episodes <= 0:
             raise ValueError("validation interval and episode count must be positive")
         args.save_folder = args.save_folder / "runs" / args.run_id
