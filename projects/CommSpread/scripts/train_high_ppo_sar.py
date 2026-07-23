@@ -53,6 +53,13 @@ CSV_FIELDS = [
     "high_reward_mean",
     "high_reward_sum",
     "duration_mean",
+    "duration_p50",
+    "duration_p90",
+    "duration_max",
+    "effective_options",
+    "success_terminal_options",
+    "timeout_options",
+    "post_success_excluded_options",
     "detected_targets_mean",
     "visited_targets_mean",
     "retired_agents_mean",
@@ -68,6 +75,7 @@ CSV_FIELDS = [
     "entropy",
     "approx_kl",
     "clip_fraction",
+    "explained_variance",
     "intent_loss",
     "intent_top1_accuracy",
     "intent_none_accuracy",
@@ -100,6 +108,10 @@ CSV_FIELDS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--chapter1-config", type=Path, default=None)
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--validation-every-updates", type=int, default=10)
+    parser.add_argument("--validation-episodes", type=int, default=128)
+    parser.add_argument("--validation-seed", type=int, default=10000)
     parser.add_argument("--low-level-checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--enable-low-level-goal-fallback", action="store_true")
     parser.add_argument("--low-level-goal-near-threshold", type=float, default=0.25)
@@ -317,6 +329,12 @@ def main() -> None:
         raise ValueError("finder-first cascade requires --dynamic-rescue-release")
     if args.enable_phase_policy and not args.progress_features:
         raise ValueError("phase policy requires --progress-features")
+    if chapter1 is not None:
+        if not args.run_id:
+            raise ValueError("strict Chapter 1 training requires --run-id")
+        if args.validation_every_updates <= 0 or args.validation_episodes <= 0:
+            raise ValueError("validation interval and episode count must be positive")
+        args.save_folder = args.save_folder / "runs" / args.run_id
     workspace_root = Path(__file__).resolve().parents[3]
     try:
         args.git_head = subprocess.check_output(
@@ -326,9 +344,11 @@ def main() -> None:
             ["git", "diff", "--binary"], cwd=workspace_root
         )
         args.git_diff_sha256 = hashlib.sha256(git_diff).hexdigest()
+        args.git_worktree_clean = not bool(git_diff)
     except (OSError, subprocess.CalledProcessError):
         args.git_head = "unknown"
         args.git_diff_sha256 = "unknown"
+        args.git_worktree_clean = False
     args.command = [sys.executable, *sys.argv]
     learned_coordination_modes = int(args.enable_commitment_aware_actor) + int(
         args.enable_teammate_intention_coordination
@@ -344,7 +364,7 @@ def main() -> None:
             "coordination experiment"
         )
     torch.manual_seed(args.seed)
-    args.save_folder.mkdir(parents=True, exist_ok=True)
+    args.save_folder.mkdir(parents=True, exist_ok=False)
     if chapter1 is not None:
         save_resolved_config(chapter1, args.save_folder)
         print("\n".join(fingerprint_lines(chapter1)), flush=True)
@@ -359,6 +379,7 @@ def main() -> None:
         json.dumps(config, indent=2),
         encoding="utf-8",
     )
+    write_run_manifest(args.save_folder / "run_manifest.json", args=args, chapter1=chapter1)
     csv_path = scalars_dir / "train.csv"
     run_summary_path = texts_dir / "run_summary.txt"
     write_run_summary(
@@ -541,8 +562,9 @@ def main() -> None:
                 low_level_source=low_level_source,
                 actor_metrics=high_policy.metrics(),
             )
-            print_update(update, rollout_metrics | update_metrics)
-            all_metrics = {"update": update} | rollout_metrics | update_metrics
+            diagnostics = strict_smdp_diagnostics(batch)
+            print_update(update, rollout_metrics | diagnostics | update_metrics)
+            all_metrics = {"update": update} | rollout_metrics | diagnostics | update_metrics
             append_train_csv(csv_path, all_metrics)
 
             if update % args.save_interval == 0 or update == args.updates:
@@ -784,6 +806,7 @@ def summarize_rollout(
 
 
 def print_update(update: int, metrics: dict[str, float | int | str]) -> None:
+
     print(
         "\n".join(
             [
@@ -864,6 +887,28 @@ def entropy_total(scenario) -> torch.Tensor:
     return scenario._compute_entropy(scenario.belief_maps).sum(dim=(-1, -2))
 
 
+def strict_smdp_diagnostics(batch: dict[str, torch.Tensor]) -> dict[str, float | int]:
+    """Diagnostics computed before masked rows can reach PPO losses."""
+    valid = batch["train_active_mask"].bool().view(-1)
+    duration = batch["duration"].float().view(-1)
+    returns = batch["return"].float().view(-1)
+    values = batch["old_value"].float().view(-1)
+    variance = torch.var(returns, unbiased=False)
+    explained = 0.0 if float(variance) == 0.0 else 1.0 - float(
+        torch.var(returns - values, unbiased=False) / variance
+    )
+    return {
+        "effective_options": int(valid.sum().item()),
+        "success_terminal_options": int(batch["task_success_terminal"].sum().item()),
+        "timeout_options": int(batch["time_limit_truncated"].sum().item()),
+        "post_success_excluded_options": int((~valid).sum().item()),
+        "duration_p50": float(torch.quantile(duration, 0.5).item()),
+        "duration_p90": float(torch.quantile(duration, 0.9).item()),
+        "duration_max": float(duration.max().item()),
+        "explained_variance": explained,
+
+    }
+
 def save_checkpoint(
     path: Path,
     policy: HGSARActorCriticPolicy,
@@ -920,6 +965,33 @@ def serialize_config(args: argparse.Namespace) -> dict[str, Any]:
     return config
 
 
+def write_run_manifest(path: Path, *, args: argparse.Namespace, chapter1) -> None:
+    """Persist immutable inputs for a strict-SMDP high-level run."""
+    checkpoint = Path(args.low_level_checkpoint).resolve()
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    manifest = {
+        "schema_version": 1,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "high_level_initialization": "random",
+        "resume_checkpoint": None,
+        "git_head": args.git_head,
+        "git_diff_sha256": args.git_diff_sha256,
+        "git_worktree_clean": args.git_worktree_clean,
+        "task_version": getattr(args, "task_version", None),
+        "task_config_sha256": getattr(args, "task_config_sha256", None),
+        "config_sha256": chapter1.config_sha256 if chapter1 is not None else None,
+        "low_level_checkpoint": {
+            "path": str(checkpoint), "bytes": checkpoint.stat().st_size,
+            "sha256": digest.hexdigest(), "variant": getattr(args, "low_level_task_variant", None),
+            "physics_profile": getattr(args, "physics_profile", None),
+            "metadata_policy": "legacy_checkpoint_sha256_and_runtime_profile_guard",
+        },
+    }
+
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 def append_train_csv(path: Path, metrics: dict[str, float | int | str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists()
