@@ -8,6 +8,8 @@ from typing import Protocol
 import torch
 from torch import Tensor
 
+from comm_spread.smdp_returns import LEGACY_EVENT_STEP, RETURN_MODES, STRICT_SMDP
+
 
 @dataclass
 class HighLevelTransition:
@@ -20,6 +22,13 @@ class HighLevelTransition:
     value: Tensor
     reward: Tensor
     done: Tensor
+    terminal: Tensor
+    task_success_terminal: Tensor
+    environment_done: Tensor
+    time_limit_truncated: Tensor
+    train_active_mask: Tensor
+    agent_terminal: Tensor
+    next_value: Tensor
     duration: int
     ego_node: Tensor
     teammate_nodes: Tensor
@@ -43,11 +52,19 @@ class HighLevelTransition:
     intent_teacher: Tensor
     intent_teacher_mask: Tensor
     intent_teacher_simultaneous_mask: Tensor
+    next_ego_node: Tensor
+    next_global_map_channels: Tensor
+    next_global_agent_nodes: Tensor
+    recurrent_state: Tensor
+    next_recurrent_state: Tensor
 
 
 class HighLevelPolicy(Protocol):
     def __call__(self, observation: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
         """Return action, log_prob, value for each requested decision."""
+
+    def value(self, observation: dict[str, Tensor]) -> Tensor:
+        """Return critic values without sampling or updating actor state."""
 
 
 class LowLevelPolicy(Protocol):
@@ -70,6 +87,12 @@ class FirstExploreNodePolicy:
         )
 
 
+    def value(self, observation: dict[str, Tensor]) -> Tensor:
+        return torch.zeros(
+            observation["ego_node"].shape[0], 1,
+            device=observation["ego_node"].device,
+        )
+
 class GreedyExplorePolicy:
     """Select the exploration node with the highest utility feature."""
 
@@ -84,6 +107,12 @@ class GreedyExplorePolicy:
             torch.zeros(n, 1, device=device),
         )
 
+
+    def value(self, observation: dict[str, Tensor]) -> Tensor:
+        return torch.zeros(
+            observation["ego_node"].shape[0], 1,
+            device=observation["ego_node"].device,
+        )
 
 class TargetFirstPolicy:
     """Prioritize detected targets; otherwise select the highest-utility explore node."""
@@ -104,6 +133,12 @@ class TargetFirstPolicy:
         )
 
 
+    def value(self, observation: dict[str, Tensor]) -> Tensor:
+        return torch.zeros(
+            observation["ego_node"].shape[0], 1,
+            device=observation["ego_node"].device,
+        )
+
 class AsyncSMDPCollector:
     """Collect per-agent high-level transitions at asynchronous decision times."""
 
@@ -115,16 +150,35 @@ class AsyncSMDPCollector:
         low_level_policy: LowLevelPolicy | None = None,
         proportional_gain: float = 2.0,
         coordinated_target_selection: bool = False,
+        gamma: float = 0.99,
+        return_mode: str = LEGACY_EVENT_STEP,
+        training_success_terminal: bool = True,
+        environment_continue_after_success: bool = True,
+        exclude_post_success_steps_from_training: bool = True,
     ) -> None:
+        if return_mode not in RETURN_MODES:
+            raise ValueError(f"unknown high-level return mode: {return_mode!r}")
+        if not training_success_terminal:
+            raise ValueError("task success must be a high-level training terminal")
+        if not environment_continue_after_success:
+            raise ValueError("Chapter 1 requires environment continuation after success")
+        if not exclude_post_success_steps_from_training:
+            raise ValueError("post-success environment steps must be excluded from training")
         self.env = env
         self.policy = high_level_policy or FirstExploreNodePolicy()
         self.low_level_policy = low_level_policy
         self.proportional_gain = proportional_gain
         self.coordinated_target_selection = coordinated_target_selection
+        self.gamma = float(gamma)
+        self.return_mode = return_mode
         self.transitions: list[HighLevelTransition] = []
         self._pending: dict[tuple[int, int], dict[str, Tensor | int]] = {}
         self._time = torch.zeros(env.scenario.world.batch_dim, dtype=torch.long, device=env.scenario.world.device)
         self._return_accumulator = torch.zeros_like(env.scenario.high_rewards)
+        self._train_active_mask = torch.ones(
+            env.scenario.world.batch_dim, dtype=torch.bool,
+            device=env.scenario.world.device,
+        )
         self._dynamic_initial_entropy = torch.full_like(self._time, torch.nan, dtype=torch.float)
         self._dynamic_previous_entropy = torch.full_like(
             self._dynamic_initial_entropy, torch.nan
@@ -172,6 +226,7 @@ class AsyncSMDPCollector:
         self.env.reset()
         self._time.zero_()
         self._return_accumulator.zero_()
+        self._train_active_mask.fill_(True)
         entropy = self.scenario._compute_entropy(self.scenario.belief_maps).mean(
             dim=(-1, -2, -3)
         )
@@ -207,7 +262,18 @@ class AsyncSMDPCollector:
     def step(self) -> Tensor:
         actions = self._low_level_actions()
         _, _, dones, _ = self.env.step(actions)
-        self._return_accumulator += self.scenario.high_rewards
+        pending_mask = self._pending_mask()
+        active_pending = pending_mask & self._train_active_mask.unsqueeze(-1)
+        if self.return_mode == STRICT_SMDP:
+            elapsed = torch.zeros_like(self._return_accumulator)
+            for (env_id, agent_id), pending in self._pending.items():
+                elapsed[env_id, agent_id] = self._time[env_id] - int(pending["start_t"])
+            reward_weight = self.gamma ** elapsed
+        else:
+            reward_weight = torch.ones_like(self._return_accumulator)
+        self._return_accumulator += (
+            self.scenario.high_rewards * reward_weight * active_pending.float()
+        )
         self._time += 1
         if getattr(self.scenario, "dynamic_rescue_release", False):
             entropy = self.scenario._compute_entropy(self.scenario.belief_maps).mean(
@@ -217,22 +283,23 @@ class AsyncSMDPCollector:
             self._dynamic_entropy_rate.mul_(0.8).add_(instantaneous_rate * 0.2)
             self._dynamic_previous_entropy.copy_(entropy)
 
-        decision_mask = (
+        task_success = self.scenario.success.bool()
+        task_success_terminal = self._train_active_mask & task_success
+        environment_done = dones.bool()
+        time_limit_truncated = environment_done & ~task_success
+        decision_mask = self._train_active_mask.unsqueeze(-1) & (
             self.scenario.goal_done
             | ~self.scenario.active_agents
-            | dones.unsqueeze(-1)
+            | environment_done.unsqueeze(-1)
         )
         current_global_detected = self.scenario.target_detected.any(dim=1)
         current_rescue_commitment = self.scenario.assigned_tasks[..., 0] > 0.5
         cascade_decision_mask = torch.zeros_like(self.scenario.active_agents)
         if getattr(self.scenario, "enable_finder_first_cascade", False):
             cascade_decision_mask |= self._advance_finder_cascades(
-                current_global_detected,
-                current_rescue_commitment,
+                current_global_detected, current_rescue_commitment,
             )
-            cascade_decision_mask |= self._register_new_finders(
-                current_rescue_commitment
-            )
+            cascade_decision_mask |= self._register_new_finders(current_rescue_commitment)
         if getattr(self.scenario, "redecide_on_detection_change", False):
             if getattr(self.scenario, "enable_finder_first_cascade", False):
                 decision_mask |= cascade_decision_mask
@@ -240,40 +307,57 @@ class AsyncSMDPCollector:
                 detection_changed = (
                     current_global_detected != self._previous_global_detected
                 ).any(dim=-1)
-                decision_mask = decision_mask | (
+                decision_mask |= (
                     detection_changed.unsqueeze(-1)
                     & self.scenario.active_agents
                     & ~current_rescue_commitment
+                    & self._train_active_mask.unsqueeze(-1)
                 )
         self._previous_global_detected.copy_(current_global_detected)
         if getattr(self.scenario, "redecide_on_assignment_change", False):
-            assignment_changed = (
-                current_rescue_commitment != self._previous_rescue_commitment
-            ).any(dim=-1)
-            decision_mask = decision_mask | (
-                assignment_changed.unsqueeze(-1)
+            changed_agents = current_rescue_commitment != self._previous_rescue_commitment
+            decision_mask |= (
+                changed_agents
                 & self.scenario.active_agents
                 & ~current_rescue_commitment
+                & self._train_active_mask.unsqueeze(-1)
             )
         self._previous_rescue_commitment.copy_(current_rescue_commitment)
-        decision_mask &= torch.as_tensor(
-            [
-                [((env_id, agent_id) in self._pending) for agent_id in range(self.scenario.n_agents)]
-                for env_id in range(self.scenario.world.batch_dim)
-            ],
-            dtype=torch.bool,
-            device=self.scenario.world.device,
-        )
+        decision_mask |= task_success_terminal.unsqueeze(-1) & pending_mask
+        decision_mask &= pending_mask
         if decision_mask.any():
-            self._finalize(decision_mask, dones)
-            self._decide(decision_mask & self.scenario.active_agents & ~dones.unsqueeze(-1))
+            self._finalize(
+                decision_mask,
+                task_success_terminal=task_success_terminal,
+                environment_done=environment_done,
+                time_limit_truncated=time_limit_truncated,
+            )
+        self._train_active_mask &= ~task_success_terminal
+        redecision_mask = (
+            decision_mask
+            & self.scenario.active_agents
+            & ~environment_done.unsqueeze(-1)
+            & self._train_active_mask.unsqueeze(-1)
+        )
+        if redecision_mask.any():
+            self._decide(redecision_mask)
         return dones
+
+    @property
+    def train_active_mask(self) -> Tensor:
+        return self._train_active_mask.clone()
+
+    def _pending_mask(self) -> Tensor:
+        return torch.as_tensor(
+            [[(env_id, agent_id) in self._pending
+              for agent_id in range(self.scenario.n_agents)]
+             for env_id in range(self.scenario.world.batch_dim)],
+            dtype=torch.bool, device=self.scenario.world.device,
+        )
 
     def _current_commitment_target_ids(self) -> Tensor:
         scenario = self.scenario
-        target_positions = torch.stack(
-            [target.state.pos for target in scenario.targets], dim=1
-        )
+        target_positions = scenario.detected_target_positions
         distances = torch.cdist(scenario.assigned_goals, target_positions)
         minimum, target_ids = distances.min(dim=-1)
         valid = (
@@ -628,7 +712,38 @@ class AsyncSMDPCollector:
             for key, value in obs.items()
         }
 
-    def _finalize(self, decision_mask: Tensor, dones: Tensor) -> None:
+    def _finalize(
+        self,
+        decision_mask: Tensor,
+        dones: Tensor | None = None,
+        *,
+        task_success_terminal: Tensor | None = None,
+        environment_done: Tensor | None = None,
+        time_limit_truncated: Tensor | None = None,
+    ) -> None:
+        # ``dones`` is retained only for diagnostics that historically called
+        # this private method.  The training path always passes all three
+        # explicit boundary tensors and never infers semantics from ``done``.
+        if environment_done is None:
+            environment_done = dones if dones is not None else torch.zeros_like(self._time, dtype=torch.bool)
+        if task_success_terminal is None:
+            task_success_terminal = torch.zeros_like(environment_done, dtype=torch.bool)
+        if time_limit_truncated is None:
+            time_limit_truncated = environment_done & ~task_success_terminal
+        next_obs = self._high_level_observation(decision_mask)
+        value_function = getattr(self.policy, "value", None)
+        if value_function is None:
+            next_values = torch.zeros(
+                next_obs["ego_node"].shape[0], 1, device=self.scenario.world.device
+            )
+        else:
+            next_values = value_function(next_obs).detach()
+        next_rows = {
+            (int(env_id), int(agent_id)): row
+            for row, (env_id, agent_id) in enumerate(
+                zip(next_obs["env_id"], next_obs["agent_id"])
+            )
+        }
         env_ids, agent_ids = torch.nonzero(decision_mask, as_tuple=True)
         for env_id_t, agent_id_t in zip(env_ids, agent_ids):
             env_id = int(env_id_t)
@@ -639,6 +754,12 @@ class AsyncSMDPCollector:
                 continue
             end_t = int(self._time[env_id_t])
             start_t = int(pending["start_t"])
+            row = next_rows[key]
+            success_terminal = task_success_terminal[env_id_t]
+            agent_terminal = ~self.scenario.active_agents[env_id_t, agent_id_t] & ~success_terminal
+            terminal = success_terminal | agent_terminal
+            next_value = torch.where(terminal, torch.zeros_like(next_values[row]), next_values[row])
+            empty_recurrent = torch.empty(0, dtype=torch.float32, device=self.scenario.world.device)
             self.transitions.append(
                 HighLevelTransition(
                     env_id=env_id,
@@ -649,7 +770,14 @@ class AsyncSMDPCollector:
                     log_prob=pending["log_prob"],
                     value=pending["value"],
                     reward=self._return_accumulator[env_id_t, agent_id_t].detach().clone(),
-                    done=dones[env_id_t].detach().clone(),
+                    done=(terminal | environment_done[env_id_t]).detach().clone(),
+                    terminal=terminal.detach().clone(),
+                    task_success_terminal=success_terminal.detach().clone(),
+                    environment_done=environment_done[env_id_t].detach().clone(),
+                    time_limit_truncated=time_limit_truncated[env_id_t].detach().clone(),
+                    train_active_mask=torch.ones((), dtype=torch.bool, device=self.scenario.world.device),
+                    agent_terminal=agent_terminal.detach().clone(),
+                    next_value=next_value.detach().clone(),
                     duration=max(end_t - start_t, 1),
                     ego_node=pending["ego_node"],
                     teammate_nodes=pending["teammate_nodes"],
@@ -677,6 +805,11 @@ class AsyncSMDPCollector:
                     intent_teacher_simultaneous_mask=pending[
                         "intent_teacher_simultaneous_mask"
                     ],
+                    next_ego_node=next_obs["ego_node"][row].detach().clone(),
+                    next_global_map_channels=next_obs["global_map_channels"][row].detach().clone(),
+                    next_global_agent_nodes=next_obs["global_agent_nodes"][row].detach().clone(),
+                    recurrent_state=empty_recurrent.clone(),
+                    next_recurrent_state=empty_recurrent.clone(),
                 )
             )
             self._return_accumulator[env_id_t, agent_id_t] = 0

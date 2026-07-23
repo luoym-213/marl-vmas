@@ -257,6 +257,16 @@ class HGSARActorCriticPolicy(torch.nn.Module):
             values.to(output_device),
         )
 
+    @torch.no_grad()
+    def value(self, observation: dict[str, Tensor]) -> Tensor:
+        """Evaluate only the centralized critic at an option boundary."""
+        was_training = self.training
+        self.eval()
+        values = self._values(move_observation(observation, self.device))
+        if was_training:
+            self.train()
+        return values.to(observation["ego_node"].device)
+
     def evaluate_actions(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         obs = move_observation(batch, self.device)
         actions = obs["action"].long().view(-1)
