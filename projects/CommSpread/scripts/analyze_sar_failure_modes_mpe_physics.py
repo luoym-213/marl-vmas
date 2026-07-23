@@ -7,6 +7,9 @@ adapter, while preserving every existing CLI flag and output schema.
 
 from __future__ import annotations
 
+import argparse
+import sys
+from pathlib import Path
 from functools import partial
 
 import analyze_sar_failure_modes as analysis
@@ -31,11 +34,18 @@ class StrictMPELowLevelPolicy(BenchMARLLowLevelPolicy):
 
 def main() -> None:
     original_parse_args = analysis.parse_args
+    wrapper_parser = argparse.ArgumentParser(add_help=False)
+    wrapper_parser.add_argument("--chapter1-config", type=Path, default=None)
+    wrapper_args, remaining = wrapper_parser.parse_known_args()
+    config_path = wrapper_args.chapter1_config or (
+        PROJECT_ROOT / "configs/chapter1/eval_v1.yaml"
+    )
+    sys.argv = [sys.argv[0], *remaining]
 
     def parse_args():
         args = original_parse_args()
         resolved = resolve_chapter1_config(
-            PROJECT_ROOT / "configs/chapter1/eval_v1.yaml",
+            config_path,
             cli_overrides={
                 "run.evaluation.output_dir": str(args.output.parent),
                 "run.evaluation.current_seed": args.seed,
@@ -101,7 +111,7 @@ def main() -> None:
         return args
 
     analysis.parse_args = parse_args
-    frozen = resolve_chapter1_config(PROJECT_ROOT / "configs/chapter1/eval_v1.yaml")
+    frozen = resolve_chapter1_config(config_path)
     analysis.make_sar_env = partial(
         make_sar_env,
         **chapter1_sar_kwargs(frozen.task, mode="high"),
