@@ -19,6 +19,10 @@ from comm_spread.async_smdp import AsyncSMDPCollector, TargetFirstPolicy
 from comm_spread.env_factory import make_sar_env
 from comm_spread.high_level_policy import HGSARActorCriticPolicy
 from comm_spread.low_level_policy import BenchMARLLowLevelPolicy
+from comm_spread.sar_module_ablation import (
+    CoverageTrajectoryTracker,
+    ModularAblationPolicy,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +124,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--assignment-events-output", type=Path, default=None)
     parser.add_argument("--assignment-cost-matrices-output", type=Path, default=None)
     parser.add_argument("--crossing-log-output", type=Path, default=None)
+    parser.add_argument("--enable-module-ablation", action="store_true")
+    parser.add_argument(
+        "--ablation-search-module",
+        choices=("hgsar", "three_lane"),
+        default="hgsar",
+    )
+    parser.add_argument(
+        "--ablation-timing-module",
+        choices=("finder", "all_detected"),
+        default="finder",
+    )
+    parser.add_argument(
+        "--ablation-assignment-module",
+        choices=("actor", "exact"),
+        default="actor",
+    )
+    parser.add_argument("--enable-coverage-metrics", action="store_true")
+    parser.add_argument("--coverage-metrics-output", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -229,6 +251,14 @@ def build_policy(args: argparse.Namespace, scenario: Any):
     checkpoint = torch.load(args.high_level_checkpoint, map_location=args.device, weights_only=False)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
+    if args.enable_module_ablation:
+        return ModularAblationPolicy(
+            policy,
+            scenario,
+            search_module=args.ablation_search_module,
+            timing_module=args.ablation_timing_module,
+            assignment_module=args.ablation_assignment_module,
+        )
     return policy
 
 
@@ -414,6 +444,10 @@ def assignment_quality_snapshot(
 
 @torch.no_grad()
 def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], dict[str, float | int | str]]:
+    all_detected_ablation = (
+        args.enable_module_ablation
+        and args.ablation_timing_module == "all_detected"
+    )
     env = make_sar_env(
         num_envs=args.num_envs,
         device=args.device,
@@ -428,8 +462,10 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
         retire_on_rescue=args.retire_on_rescue,
         high_level_progress_features=args.progress_features,
         target_assignment_features=args.target_assignment_features,
-        staged_rescue=args.staged_rescue,
-        rescue_detected_threshold=args.rescue_detected_threshold,
+        staged_rescue=args.staged_rescue or all_detected_ablation,
+        rescue_detected_threshold=(
+            3 if all_detected_ablation else args.rescue_detected_threshold
+        ),
         rescue_entropy_threshold=args.rescue_entropy_threshold,
         dynamic_rescue_release=args.dynamic_rescue_release,
         dynamic_release_min_searchers=args.dynamic_release_min_searchers,
@@ -494,6 +530,10 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
         low_level_policy=low_policy,
         coordinated_target_selection=args.coordinated_target_selection,
     )
+    coverage_tracker = (
+        CoverageTrajectoryTracker(scenario)
+        if args.enable_coverage_metrics else None
+    )
 
     n_envs = args.num_envs
     device = scenario.world.device
@@ -555,6 +595,8 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
     ]
     previous_gate_open = torch.zeros(n_envs, dtype=torch.bool, device=device)
     seen_decisions: set[tuple[int, int, int]] = set()
+    nonfinite_state_count = torch.zeros(n_envs, dtype=torch.long, device=device)
+    invalid_assignment_count = torch.zeros(n_envs, dtype=torch.long, device=device)
 
     try:
         # Policy/checkpoint construction consumes global PyTorch RNG. Reseed
@@ -562,6 +604,8 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
         # and gating evaluations receive exactly the same initial layouts.
         torch.manual_seed(args.seed)
         collector.reset()
+        if coverage_tracker is not None:
+            coverage_tracker.start()
         initial_agents = stack_agent_positions(scenario).detach().clone().cpu().contiguous()
         initial_targets = stack_target_positions(scenario).detach().clone().cpu().contiguous()
         initial_layout = torch.cat([initial_agents, initial_targets], dim=1)
@@ -576,6 +620,9 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
             pre_visited = scenario.target_visited.detach().clone()
             pre_goal_done = scenario.goal_done.detach().clone()
             pre_active = scenario.active_agents.detach().clone()
+            pre_positions = stack_agent_positions(scenario).detach().clone()
+            pre_search_mask = pre_active & ~scenario.assigned_tasks[..., 0].bool()
+
             pre_goals = scenario.assigned_goals.detach().clone()
             pre_assigned_target = assigned_target_indices(scenario).detach().clone()
             pre_entropy_by_agent = scenario._compute_entropy(
@@ -595,6 +642,16 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
                 setattr(transition, "_counted", True)
 
             post_pos = torch.stack([agent.state.pos for agent in scenario.world.agents], dim=1)
+            nonfinite_state_count += (
+                ~torch.isfinite(post_pos).all(dim=-1)
+            ).sum(dim=-1)
+            if coverage_tracker is not None:
+                coverage_tracker.update(
+                    pre_positions=pre_positions,
+                    post_positions=post_pos,
+                    pre_search_mask=pre_search_mask,
+                )
+
             pre_pending = pre_active & ~pre_goal_done
             dist = torch.linalg.vector_norm(post_pos - pre_goals, dim=-1)
             hit = (dist <= scenario.goal_radius) & pre_pending
@@ -718,6 +775,10 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
                         nearest_target_distance_at_all_detected[env_id] = distances.min()
 
             post_assigned_target = assigned_target_indices(scenario)
+            invalid_assignment_count += (
+                scenario.assigned_tasks[..., 0].bool()
+                & (post_assigned_target < 0)
+            ).sum(dim=-1)
             current_agent_pos = stack_agent_positions(scenario)
             current_target_pos = stack_target_positions(scenario)
             detected_unvisited_now = detected_now & ~scenario.target_visited
@@ -834,6 +895,9 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
                 break
 
         entropy_final = scenario._compute_entropy(scenario.belief_maps).sum(dim=(-1, -2, -3))
+        coverage_rows = (
+            coverage_tracker.rows() if coverage_tracker is not None else None
+        )
         rows = build_rows(
             args=args,
             scenario=scenario,
@@ -888,6 +952,9 @@ def run(args: argparse.Namespace) -> tuple[list[dict[str, float | int | str]], d
             per_env_layout_sha256=per_env_layout_sha256,
             initial_agents=initial_agents,
             initial_targets=initial_targets,
+            coverage_rows=coverage_rows,
+            nonfinite_state_count=nonfinite_state_count,
+            invalid_assignment_count=invalid_assignment_count,
         )
         summary = summarize(rows, scenario.n_targets)
         summary["layout_sha256"] = layout_sha256
@@ -1048,6 +1115,26 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
             if bool(event["committer_is_finder"])
             and int(event["target_id"]) in open_step_by_target
         ]
+        rejected_target_waits: list[int] = []
+        rejected_target_later_claimed_count = 0
+        for reject_index, reject_event in enumerate(cascade_events):
+            if reject_event["event"] != "reject":
+                continue
+            target_id = int(reject_event["target_id"])
+            later_accept = next(
+                (
+                    event
+                    for event in cascade_events[reject_index + 1 :]
+                    if event["event"] == "accept"
+                    and int(event["target_id"]) == target_id
+                ),
+                None,
+            )
+            if later_accept is not None:
+                rejected_target_later_claimed_count += 1
+                rejected_target_waits.append(
+                    int(later_accept["step"]) - int(reject_event["step"])
+                )
         crossing_pair_count = sum(
             int(event["crossing_pair_count"]) for event in quality_events
         )
@@ -1070,6 +1157,12 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
                 "detected_unvisited_targets": detected_unvisited,
                 "retired_agents": retired_count,
                 "active_agents": active_count,
+                "nonfinite_state_count": int(
+                    kwargs["nonfinite_state_count"][env_id].cpu()
+                ),
+                "invalid_assignment_count": int(
+                    kwargs["invalid_assignment_count"][env_id].cpu()
+                ),
                 "explore_actions": float(kwargs["per_env_explore_actions"][env_id].cpu()),
                 "target_actions": float(kwargs["per_env_target_actions"][env_id].cpu()),
                 "goal_hits": float(kwargs["per_env_goal_hits"][env_id].cpu()),
@@ -1121,6 +1214,15 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
                 "finder_reject_count": len(finder_rejects),
                 "finder_unavailable_count": len(finder_unavailable),
                 "cascade_diffusion_count": len(cascade_diffusions),
+                "rejected_target_later_claimed_count": (
+                    rejected_target_later_claimed_count
+                ),
+                "rejected_target_wait_steps": rejected_target_waits,
+                "rejected_target_wait_mean": (
+                    sum(rejected_target_waits) / len(rejected_target_waits)
+                    if rejected_target_waits
+                    else float("nan")
+                ),
                 "final_committer_is_finder_count": sum(
                     int(bool(event["committer_is_finder"]))
                     for event in finder_accepts
@@ -1195,6 +1297,8 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
                 "min_active_distance_to_unvisited_target": finite_mean(min_active_target_dist[env_id][~visited[env_id]]),
             }
         )
+        if kwargs["coverage_rows"] is not None:
+            rows[-1].update(kwargs["coverage_rows"][env_id])
     return rows
 
 
@@ -1215,7 +1319,7 @@ def mean_pair_delay(start: torch.Tensor, end: torch.Tensor) -> float:
     return float((end[valid].float() - start[valid].float()).mean().cpu())
 
 
-def summarize(rows: list[dict[str, float | int | str]], n_targets: int) -> dict[str, float | int | str]:
+def summarize(rows: list[dict[str, Any]], n_targets: int) -> dict[str, Any]:
     total = len(rows)
     failures = [r for r in rows if not int(r["success"])]
     partial = [r for r in failures if int(r["visited_targets"]) > 0]
@@ -1232,6 +1336,12 @@ def summarize(rows: list[dict[str, float | int | str]], n_targets: int) -> dict[
         "target_actions_mean": avg(rows, "target_actions"),
         "goal_hits_mean": avg(rows, "goal_hits"),
         "active_step_hit_rate_mean": avg(rows, "active_step_hit_rate"),
+        "nonfinite_state_count": int(
+            sum(int(row["nonfinite_state_count"]) for row in rows)
+        ),
+        "invalid_assignment_count": int(
+            sum(int(row["invalid_assignment_count"]) for row in rows)
+        ),
         "duplicate_assignment_steps_mean": avg(rows, "duplicate_assignment_steps"),
         "duplicate_assignment_excess_mean": avg(rows, "duplicate_assignment_excess"),
         "detected_unassigned_steps_mean": avg(rows, "detected_unassigned_steps"),
@@ -1276,6 +1386,10 @@ def summarize(rows: list[dict[str, float | int | str]], n_targets: int) -> dict[
         "finder_unavailable_count": int(
             sum(int(r["finder_unavailable_count"]) for r in rows)
         ),
+        "rejected_target_later_claimed_count": int(
+            sum(int(r["rejected_target_later_claimed_count"]) for r in rows)
+        ),
+        "rejected_target_wait_mean": avg(rows, "rejected_target_wait_mean"),
         "cascade_diffusion_count": int(
             sum(int(r["cascade_diffusion_count"]) for r in rows)
         ),
@@ -1343,6 +1457,53 @@ def summarize(rows: list[dict[str, float | int | str]], n_targets: int) -> dict[
     }
     for reason in sorted({str(r["failure_reason"]) for r in rows}):
         count = sum(1 for r in rows if r["failure_reason"] == reason)
+    detected_all_rows = [r for r in rows if int(r["all_detected_step"]) >= 0]
+    success_rows = [r for r in rows if int(r["success"])]
+    rejected_waits = [
+        int(wait)
+        for row in rows
+        for wait in row["rejected_target_wait_steps"]
+    ]
+    summary.update(
+        {
+            "detect_all_count": len(detected_all_rows),
+            "detect_all_rate": len(detected_all_rows) / max(total, 1),
+            "success_given_detect_all": len(success_rows)
+            / max(len(detected_all_rows), 1),
+            "terminal_not_all_detected_count": total - len(detected_all_rows),
+            "detected_all_but_incomplete_count": sum(
+                int(not int(row["success"])) for row in detected_all_rows
+            ),
+            "success_step_p95": percentile(
+                [float(row["success_step"]) for row in success_rows], 0.95
+            ),
+            "rejected_target_wait_p95": percentile(
+                [float(wait) for wait in rejected_waits], 0.95
+            ),
+        }
+    )
+    if rows and "team_coverage_rate" in rows[0]:
+        for key in (
+            "team_explored_area",
+            "team_coverage_rate",
+            "multi_uav_overlap_area",
+            "overlap_ratio",
+            "explored_area_revisit_ratio",
+            "search_travel_distance",
+            "coverage_efficiency",
+            "search_option_switches",
+            "search_heading_continuity",
+        ):
+            summary[f"{key}_mean"] = avg(rows, key)
+        summary["per_agent_explored_area_mean"] = mean_lists(
+            rows, "per_agent_explored_area"
+        )
+        summary["per_agent_search_travel_distance_mean"] = mean_lists(
+            rows, "per_agent_search_travel_distance"
+        )
+        summary["per_agent_search_option_switches_mean"] = mean_lists(
+            rows, "per_agent_search_option_switches"
+        )
         summary[f"reason_{reason}"] = count
         summary[f"reason_{reason}_rate"] = count / max(total, 1)
     for category in sorted({str(r["failure_category"]) for r in rows}):
@@ -1393,6 +1554,27 @@ def avg_nonnegative(rows: list[dict[str, Any]], key: str) -> float:
     return sum(values) / max(len(values), 1)
 
 
+def percentile(values: list[float], quantile: float) -> float:
+    finite = sorted(value for value in values if math.isfinite(value))
+    if not finite:
+        return float("nan")
+    rank = (len(finite) - 1) * quantile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return finite[lower]
+    weight = rank - lower
+    return finite[lower] * (1.0 - weight) + finite[upper] * weight
+
+
+def mean_lists(rows: list[dict[str, Any]], key: str) -> list[float]:
+    width = len(rows[0][key])
+    return [
+        sum(float(row[key][index]) for row in rows) / max(len(rows), 1)
+        for index in range(width)
+    ]
+
+
 def reproducibility_metadata(args: argparse.Namespace) -> dict[str, Any]:
     workspace_root = PROJECT_ROOT.parents[1]
     try:
@@ -1438,6 +1620,34 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, float | int | s
         writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+    if args.coverage_metrics_output is not None:
+        coverage_columns = [
+            "env_id",
+            "layout_sha256",
+            "success",
+            "per_agent_explored_area",
+            "per_agent_search_travel_distance",
+            "team_explored_area",
+            "team_coverage_rate",
+            "multi_uav_overlap_area",
+            "overlap_ratio",
+            "explored_area_revisit_ratio",
+            "search_travel_distance",
+            "coverage_efficiency",
+            "search_option_switches",
+            "per_agent_search_option_switches",
+            "search_heading_continuity",
+        ]
+        args.coverage_metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        with args.coverage_metrics_output.open(
+            "w", newline="", encoding="utf-8"
+        ) as file:
+            writer = csv.DictWriter(file, fieldnames=coverage_columns)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(
+                    {key: row.get(key) for key in coverage_columns}
+                )
     assignment_events_path = args.assignment_events_output or args.output.with_name(
         f"{args.output.stem}_assignment_events.csv"
     )
@@ -1491,6 +1701,10 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, float | int | s
         f"max_steps: `{args.max_steps}`",
         f"retire_on_rescue: `{args.retire_on_rescue}`",
         f"low_level_controller: `{args.low_level_controller}`",
+        f"enable_module_ablation: `{args.enable_module_ablation}`",
+        f"ablation_search_module: `{args.ablation_search_module}`",
+        f"ablation_timing_module: `{args.ablation_timing_module}`",
+        f"ablation_assignment_module: `{args.ablation_assignment_module}`",
         f"progress_features: `{args.progress_features}`",
         f"enable_phase_policy: `{args.enable_phase_policy}`",
         f"phase_initial_rescue_logit: `{args.phase_initial_rescue_logit}`",
@@ -1556,6 +1770,32 @@ def main() -> None:
         raise ValueError(
             "low-level goal fallback applies only to the checkpoint controller"
         )
+    if args.coverage_metrics_output is not None and not args.enable_coverage_metrics:
+        raise ValueError(
+            "--coverage-metrics-output requires --enable-coverage-metrics"
+        )
+    if args.enable_module_ablation:
+        if args.policy != "hgsar":
+            raise ValueError("module ablation requires --policy hgsar")
+        if not args.enable_finder_first_cascade:
+            raise ValueError(
+                "module ablation requires --enable-finder-first-cascade"
+            )
+        if args.finder_cascade_mode != "finder_only":
+            raise ValueError(
+                "module ablation requires --finder-cascade-mode finder_only"
+            )
+        if not args.dynamic_rescue_release:
+            raise ValueError(
+                "module ablation requires --dynamic-rescue-release"
+            )
+        if not (
+            args.redecide_on_detection_change
+            and args.redecide_on_assignment_change
+        ):
+            raise ValueError(
+                "module ablation requires detection and assignment redecision"
+            )
     if args.dynamic_rescue_release and args.staged_rescue:
         raise ValueError("dynamic rescue release cannot be combined with staged rescue")
     if args.dynamic_rescue_release and args.coordinated_target_selection:
