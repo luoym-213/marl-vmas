@@ -15,9 +15,16 @@ from typing import Any
 
 os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
 
+import yaml
 import torch
 import torch.nn.functional as F
 
+from comm_spread.chapter1_health import (
+    TrainingDiagnostics,
+    ValidationWindow,
+    evaluate_training_health,
+)
+from comm_spread.chapter1_validation import run_chapter1_validation
 from comm_spread.async_smdp import AsyncSMDPCollector, HighLevelTransition
 from comm_spread.chapter1_config import (
     chapter1_sar_kwargs,
@@ -511,6 +518,17 @@ def main() -> None:
         exclude_post_success_steps_from_training=args.exclude_post_success_steps_from_training,
     )
 
+    validation_windows = []
+    diagnostic_windows = []
+    validation_records = []
+    if chapter1 is not None:
+        initial_checkpoint = checkpoint_dir / "checkpoint_0.pt"
+        save_checkpoint(initial_checkpoint, high_policy, optimizer, 0, args)
+        window, record = run_validation_window(
+            args=args, chapter1=chapter1, policy=high_policy, update=0,
+            checkpoint=initial_checkpoint, high_reward_mean=0.0,
+        )
+        validation_windows.append(window); validation_records.append(record)
     try:
         for update in range(start_update + 1, args.updates + 1):
             high_policy.reset_stats()
@@ -580,6 +598,27 @@ def main() -> None:
                 last_metrics=all_metrics,
                 latest_checkpoint=checkpoint_dir / "latest.pt",
             )
+            if chapter1 is not None:
+                diagnostic_windows.append(TrainingDiagnostics(update, int(diagnostics["effective_options"]), float(update_metrics["approx_kl"])))
+            if chapter1 is not None and update % args.validation_every_updates == 0:
+                bound_checkpoint = checkpoint_dir / f"checkpoint_{update}.pt"
+                if not bound_checkpoint.exists():
+                    save_checkpoint(bound_checkpoint, high_policy, optimizer, update, args)
+                window, record = run_validation_window(
+                    args=args, chapter1=chapter1, policy=high_policy, update=update,
+                    checkpoint=bound_checkpoint, high_reward_mean=float(rollout_metrics["high_reward_mean"]),
+                )
+                validation_windows.append(window)
+                validation_records.append(record)
+                decision = evaluate_training_health(validation_windows, diagnostic_windows)
+                append_jsonl(args.save_folder / "health_decisions.jsonl", {
+                    "update": update, "status": decision.status, "reason": decision.reason,
+                })
+                if decision.passed_for_final_evaluation:
+                    write_derived_eval_config(args, validation_records, validation_windows)
+                if decision.early_stop_failed:
+                    write_run_summary(run_summary_path, args=args, status="early_stop_failed", final_update=update, last_metrics=all_metrics, latest_checkpoint=checkpoint_dir / "latest.pt")
+                    break
     finally:
         if low_policy is not None:
             low_policy.close()
@@ -1059,6 +1098,59 @@ def write_run_summary(
     else:
         lines.append("  none")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_validation_window(*, args, chapter1, policy, update, checkpoint, high_reward_mean):
+    low = chapter1.run["training"]["low_level_checkpoint"]
+    destination = args.save_folder / "validation" / f"update_{update:04d}"
+    _, summary = run_chapter1_validation(
+        resolved=chapter1,
+        low_level_checkpoint=args.low_level_checkpoint,
+        low_level_sha256=low["sha256"],
+        output_dir=destination,
+        high_level_policy=policy,
+        seed=args.validation_seed,
+        episodes=args.validation_episodes,
+        device=args.device,
+    )
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    binding = {
+        "update": update,
+        "checkpoint": str(checkpoint.relative_to(args.save_folder)),
+        "checkpoint_sha256": digest,
+        "task_config_sha256": chapter1.task_config_sha256,
+        "config_sha256": chapter1.config_sha256,
+    }
+    (destination / "checkpoint_binding.json").write_text(
+        json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return ValidationWindow(update, float(summary["success_rate"]), float(high_reward_mean)), summary | binding
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+
+def write_derived_eval_config(args, records, windows) -> Path:
+    rewards = {item.update: item.high_reward_mean for item in windows}
+    best = max(records[1:], key=lambda item: (
+        item["success_rate"], item["detect_all_rate"], rewards[item["update"]], -item["update"],
+    ))
+    source = PROJECT_ROOT / "configs/chapter1/eval_v1.yaml"
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    checkpoint = args.save_folder / best["checkpoint"]
+    document["evaluation"]["high_level_checkpoint"] = {
+        "path": str(checkpoint.relative_to(PROJECT_ROOT)),
+        "sha256": best["checkpoint_sha256"],
+        "provenance": "strict_smdp_random_init",
+    }
+    destination = args.save_folder / "derived_eval_v1.yaml"
+    destination.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return destination
+
 
 
 if __name__ == "__main__":
