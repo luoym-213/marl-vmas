@@ -11,15 +11,16 @@ from torch import Tensor
 from vmas.simulator.core import Agent, Landmark, Sphere, World
 from vmas.simulator.dynamics.holonomic import Holonomic
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.utils import (
-    ANGULAR_FRICTION,
-    DRAG,
-    LINEAR_FRICTION,
-    Color,
-    ScenarioUtils,
-)
+from vmas.simulator.utils import Color, ScenarioUtils
 
+from comm_spread.mpe_physics import MPEParityWorld
 from comm_spread.rrt import RRTConfig, plan_batch
+from comm_spread.team_belief import (
+    bayesian_update,
+    detected_target_centroids,
+    individual_fov_masks,
+    target_occupancy_map,
+)
 
 if typing.TYPE_CHECKING:
     from vmas.simulator.rendering import Geom
@@ -44,6 +45,21 @@ class SarScenario(BaseScenario):
         self.target_assignment_features = kwargs.pop("target_assignment_features", False)
         self.n_agents = kwargs.pop("n_agents", 3)
         self.n_targets = kwargs.pop("n_targets", self.n_agents)
+        self.physics_profile = kwargs.pop("physics_profile", "legacy")
+        if self.physics_profile not in {"legacy", "mpe_strict"}:
+            raise ValueError(f"invalid physics profile: {self.physics_profile}")
+        strict_physics = self.physics_profile == "mpe_strict"
+        self.mpe_action_force_scale = kwargs.pop("mpe_action_force_scale", 5.0)
+        self.world_substeps = kwargs.pop("world_substeps", 1 if strict_physics else 5)
+        self.world_collision_force = kwargs.pop(
+            "world_collision_force", 100 if strict_physics else 500
+        )
+        self.world_contact_margin = kwargs.pop("world_contact_margin", 0.001)
+        self.world_dt = kwargs.pop("world_dt", 0.1)
+        self.world_drag = kwargs.pop("world_drag", 0.25)
+        self.world_linear_friction = kwargs.pop("world_linear_friction", 0.0)
+        self.world_angular_friction = kwargs.pop("world_angular_friction", 0.0)
+        self.world_hard_bounds = kwargs.pop("world_hard_bounds", not strict_physics)
         self.staged_rescue = kwargs.pop("staged_rescue", False)
         self.rescue_detected_threshold = kwargs.pop("rescue_detected_threshold", self.n_targets)
         self.rescue_entropy_threshold = kwargs.pop("rescue_entropy_threshold", None)
@@ -107,6 +123,12 @@ class SarScenario(BaseScenario):
         self.sensor_radius = kwargs.pop("sensor_radius", 0.3)
         self.sensor_fidelity = kwargs.pop("sensor_fidelity", 0.8)
         self.initial_belief = kwargs.pop("initial_belief", 0.5)
+        self.belief_detection_threshold = kwargs.pop(
+            "belief_detection_threshold", 0.95
+        )
+        self.belief_include_inactive_agents = kwargs.pop(
+            "belief_include_inactive_agents", True
+        )
 
         self.goal_reward = kwargs.pop("goal_reward", 2.0)
         self.rescue_reward = kwargs.pop("rescue_reward", 10.0)
@@ -195,18 +217,20 @@ class SarScenario(BaseScenario):
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
-        world = World(
+        world_class = MPEParityWorld if strict_physics else World
+        world = world_class(
             batch_dim,
             device,
-            x_semidim=self.world_spawning_x,
-            y_semidim=self.world_spawning_y,
-            substeps=5,
-            collision_force=500,
-            dt=0.1,
+            x_semidim=self.world_spawning_x if self.world_hard_bounds else None,
+            y_semidim=self.world_spawning_y if self.world_hard_bounds else None,
+            substeps=self.world_substeps,
+            collision_force=self.world_collision_force,
+            contact_margin=self.world_contact_margin,
+            dt=self.world_dt,
             gravity=(0.0, 0.0),
-            drag=DRAG,
-            linear_friction=LINEAR_FRICTION,
-            angular_friction=ANGULAR_FRICTION,
+            drag=self.world_drag,
+            linear_friction=self.world_linear_friction,
+            angular_friction=self.world_angular_friction,
         )
 
         colors = [
@@ -219,15 +243,27 @@ class SarScenario(BaseScenario):
             Color.RED,
         ]
         for i in range(self.n_agents):
+            action_kwargs = (
+                {
+                    "action_size": 1,
+                    "discrete_action_nvec": [5],
+                    "u_range": [1.0],
+                    "u_multiplier": [1.0],
+                }
+                if strict_physics
+                else {
+                    "u_range": [1.0, 1.0],
+                    "u_multiplier": [1.0, 1.0],
+                }
+            )
             agent = Agent(
                 name=f"agent_{i}",
                 collide=True,
                 color=colors[i] if i < len(colors) else torch.rand(3, device=device),
                 render_action=True,
                 shape=Sphere(radius=self.agent_radius),
-                u_range=[1.0, 1.0],
-                u_multiplier=[1.0, 1.0],
                 dynamics=Holonomic(),
+                **action_kwargs,
             )
             agent.sar_index = i
             world.add_agent(agent)
@@ -277,6 +313,16 @@ class SarScenario(BaseScenario):
             self.n_targets,
             dtype=torch.bool,
             device=device,
+        )
+        self.detected_target_positions = torch.zeros(
+            batch_dim, self.n_targets, 2, dtype=torch.float32, device=device
+        )
+        self.last_individual_fov = torch.zeros(
+            batch_dim, self.n_agents, self.map_dim, self.map_dim,
+            dtype=torch.bool, device=device
+        )
+        self.last_joint_fov = torch.zeros(
+            batch_dim, self.map_dim, self.map_dim, dtype=torch.bool, device=device
         )
         self.target_visited = torch.zeros(
             batch_dim,
@@ -341,6 +387,9 @@ class SarScenario(BaseScenario):
         self.goal_done[batch_slice] = True
         self.assigned_tasks[batch_slice] = 0.0
         self.target_detected[batch_slice] = False
+        self.detected_target_positions[batch_slice] = 0.0
+        self.last_individual_fov[batch_slice] = False
+        self.last_joint_fov[batch_slice] = False
         self.target_visited[batch_slice] = False
         self.target_detected_step[batch_slice] = -1
         self.last_new_target_finders[batch_slice] = False
@@ -351,6 +400,12 @@ class SarScenario(BaseScenario):
         self.world_steps[batch_slice] = 0
         self.belief_maps[batch_slice] = self.initial_belief
 
+        # Match MPE reset semantics: the shared team map receives one sensor
+        # update before the first high-level decision. One positive update is
+        # still below the 0.95 detection threshold.
+        self._update_beliefs_and_discoveries(
+            record_discovery_events=False, env_index=env_index
+        )
         self._refresh_maps(env_index)
         if env_index is None:
             self._sample_goals(torch.ones_like(self.goal_done))
@@ -366,6 +421,19 @@ class SarScenario(BaseScenario):
         if not hasattr(agent.action, "u") or agent.action.u is None:
             return
         index = agent.sar_index
+        if self.physics_profile == "mpe_strict":
+            raw = agent.action.u[:, 0]
+            mapped = torch.zeros(
+                self.world.batch_dim,
+                2,
+                dtype=torch.float32,
+                device=self.world.device,
+            )
+            mapped[raw <= -0.75, 0] = -1.0
+            mapped[(raw > -0.75) & (raw < -1e-6), 0] = 1.0
+            mapped[(raw > 1e-6) & (raw < 0.75), 1] = -1.0
+            mapped[raw >= 0.75, 1] = 1.0
+            agent.action.u = mapped * self.mpe_action_force_scale
         agent.action.u = agent.action.u * self.active_agents[:, index].unsqueeze(-1)
 
     def reward(self, agent: Agent) -> Tensor:
@@ -417,6 +485,10 @@ class SarScenario(BaseScenario):
         )
         return {
             "belief_map": self.belief_maps[:, index],
+            "team_belief_map": self.belief_maps[:, 0],
+            "joint_fov_mask": self.last_joint_fov,
+            "individual_fov_masks": self.last_individual_fov,
+            "detected_target_positions": self.detected_target_positions,
             "entropy_map": entropy_maps[:, index],
             "voronoi_masks": voronoi_masks[:, index].float(),
             "heatmap": agent_heatmap[:, index],
@@ -719,10 +791,16 @@ class SarScenario(BaseScenario):
         penalties = torch.zeros_like(self.agent_rewards)
         for i, agent in enumerate(self.world.agents):
             pos = agent.state.pos
-            out = (
-                (pos[..., 0].abs() + self.agent_radius > self.world_spawning_x)
-                | (pos[..., 1].abs() + self.agent_radius > self.world_spawning_y)
-            )
+            if self.physics_profile == "mpe_strict":
+                out = (
+                    (pos[..., 0].abs() >= self.world_spawning_x)
+                    | (pos[..., 1].abs() >= self.world_spawning_y)
+                )
+            else:
+                out = (
+                    (pos[..., 0].abs() + self.agent_radius > self.world_spawning_x)
+                    | (pos[..., 1].abs() + self.agent_radius > self.world_spawning_y)
+                )
             penalties[:, i] = self.boundary_penalty * (out & self.active_agents[:, i]).float()
         return penalties
 
@@ -762,7 +840,7 @@ class SarScenario(BaseScenario):
             and self.detected_unassigned_target_penalty <= 0
         ):
             return rewards
-        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        target_pos = self.detected_target_positions
         collect_task = self.assigned_tasks[..., 0] > 0.5
         dists = torch.cdist(self.assigned_goals, target_pos)
         min_dist, assigned_index = dists.min(dim=-1)
@@ -838,63 +916,119 @@ class SarScenario(BaseScenario):
         *,
         active_count_before: Tensor | None = None,
         visited_count_before: Tensor | None = None,
+        record_discovery_events: bool = True,
+        env_index: int | None = None,
     ) -> Tensor:
-        before_entropy = self._compute_entropy(self.belief_maps).sum(dim=(-1, -2))
+        """Update one team-shared Bayesian map and threshold detections.
+
+        Every agent receives an identical copy in ``belief_maps`` for backward
+        compatibility with existing actor/critic and RRT tensor shapes. Sensors
+        from inactive agents remain enabled by default to match audited MPE.
+        """
+
+        shared_prior = self.belief_maps[:, 0]
+        before_entropy = self._compute_entropy(shared_prior).sum(dim=(-1, -2))
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
-        for agent_index in range(self.n_agents):
-            pos = agent_pos[:, agent_index]
-            dx = self.cell_world_x.unsqueeze(0) - pos[:, 0].view(-1, 1, 1)
-            dy = self.cell_world_y.unsqueeze(0) - pos[:, 1].view(-1, 1, 1)
-            in_fov = (dx.square() + dy.square()) <= self.sensor_radius**2
-            in_fov = in_fov & self.active_agents[:, agent_index].view(-1, 1, 1)
-            updated = self._bayes_positive_update(self.belief_maps[:, agent_index])
-            self.belief_maps[:, agent_index] = torch.where(
-                in_fov,
-                updated,
-                self.belief_maps[:, agent_index],
-            )
-
-        after_entropy = self._compute_entropy(self.belief_maps).sum(dim=(-1, -2))
-        entropy_gain = (before_entropy - after_entropy).clamp(min=0.0)
-
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
-        agent_target_dist = torch.cdist(agent_pos, target_pos)
-        active_mask = self.active_agents.unsqueeze(-1)
+        occupied = target_occupancy_map(
+            self.cell_world_x, self.cell_world_y, target_pos, self.target_radius
+        )
+        sensor_enabled = (
+            None if self.belief_include_inactive_agents else self.active_agents
+        )
+        individual_fov = individual_fov_masks(
+            self.cell_world_x,
+            self.cell_world_y,
+            agent_pos,
+            self.sensor_radius,
+            sensor_enabled,
+        )
+        update_env = torch.ones(
+            self.world.batch_dim, dtype=torch.bool, device=self.world.device
+        )
+        if env_index is not None:
+            update_env.zero_()
+            update_env[env_index] = True
+            individual_fov &= update_env.view(-1, 1, 1, 1)
+        joint_fov = individual_fov.any(dim=1)
+        self.last_individual_fov = torch.where(
+            update_env.view(-1, 1, 1, 1),
+            individual_fov,
+            self.last_individual_fov,
+        )
+        self.last_joint_fov = torch.where(
+            update_env.view(-1, 1, 1), joint_fov, self.last_joint_fov
+        )
+
+        # Preserve MPE-style per-agent counterfactual exploration rewards while
+        # using the union FOV for the actual shared map state.
+        individual_posteriors = bayesian_update(
+            shared_prior.unsqueeze(1),
+            individual_fov,
+            occupied.unsqueeze(1),
+            self.sensor_fidelity,
+        )
+        individual_entropy = self._compute_entropy(individual_posteriors).sum(
+            dim=(-1, -2)
+        )
+        entropy_gain = (before_entropy.unsqueeze(-1) - individual_entropy).clamp_min(0.0)
+
+        shared_posterior = bayesian_update(
+            shared_prior, joint_fov, occupied, self.sensor_fidelity
+        )
+        self.belief_maps.copy_(
+            shared_posterior.unsqueeze(1).expand_as(self.belief_maps)
+        )
+
+        belief_detected, belief_centroids = detected_target_centroids(
+            shared_posterior,
+            self.belief_detection_threshold,
+            self.cell_world_x,
+            self.cell_world_y,
+            target_pos,
+            self.target_radius,
+        )
         detected_any_before = self.target_detected.any(dim=1)
-        self.last_new_target_finders.zero_()
-        newly_detected = (agent_target_dist <= self.sensor_radius) & active_mask
-        newly_detected = newly_detected & ~self.target_detected
-        newly_detected_any = newly_detected.any(dim=1)
-        globally_new = newly_detected_any & ~detected_any_before
-        new_finder_candidates = newly_detected & globally_new.unsqueeze(1)
-        candidate_distances = agent_target_dist.masked_fill(
-            ~new_finder_candidates,
-            torch.inf,
+        globally_new = belief_detected & ~detected_any_before
+        self.detected_target_positions = torch.where(
+            belief_detected.unsqueeze(-1),
+            belief_centroids,
+            self.detected_target_positions,
         )
-        minimum_finder_distance = candidate_distances.min(dim=1).values
-        # Exact geometric ties remain co-finders. Selecting an arbitrary index
-        # would introduce a hidden leader and break permutation consistency.
-        self.last_new_target_finders = (
-            new_finder_candidates
-            & (
-                candidate_distances
-                <= minimum_finder_distance.unsqueeze(1) + 1e-6
-            )
+        shared_detected = belief_detected.unsqueeze(1).expand(
+            -1, self.n_agents, -1
         )
-        self.target_first_finder_mask |= self.last_new_target_finders
+        self.target_detected |= shared_detected
         self.target_detected_step = torch.where(
-            newly_detected_any & (self.target_detected_step < 0),
+            globally_new & (self.target_detected_step < 0),
             self.world_steps.view(-1, 1).expand_as(self.target_detected_step),
             self.target_detected_step,
         )
-        self.target_detected |= newly_detected
+
+        self.last_new_target_finders.zero_()
+        newly_detected = torch.zeros_like(self.target_detected)
+        if record_discovery_events and globally_new.any():
+            agent_target_dist = torch.cdist(agent_pos, target_pos)
+            candidates = (agent_target_dist <= self.sensor_radius)
+            candidates &= self.active_agents.unsqueeze(-1)
+            candidates &= globally_new.unsqueeze(1)
+            candidate_distances = agent_target_dist.masked_fill(~candidates, torch.inf)
+            minimum_finder_distance = candidate_distances.min(dim=1).values
+            self.last_new_target_finders = (
+                candidates
+                & (candidate_distances <= minimum_finder_distance.unsqueeze(1) + 1e-6)
+            )
+            self.target_first_finder_mask |= self.last_new_target_finders
+            newly_detected = candidates
 
         discover_counts = newly_detected.float().sum(dim=-1)
         per_agent_discovery = self.discovery_reward * discover_counts
         if self.search_capacity_discovery_bonus > 0:
             if active_count_before is None:
                 active_count_before = self.active_agents.float().sum(dim=-1)
-            enough_search_capacity = active_count_before >= float(self.discovery_active_agents_threshold)
+            enough_search_capacity = active_count_before >= float(
+                self.discovery_active_agents_threshold
+            )
             per_agent_discovery = per_agent_discovery + (
                 self.search_capacity_discovery_bonus
                 * discover_counts
@@ -902,11 +1036,15 @@ class SarScenario(BaseScenario):
             )
         if self.all_targets_detected_bonus > 0:
             detected_any_after = self.target_detected.any(dim=1)
-            crossed_all_detected = detected_any_after.all(dim=-1) & ~detected_any_before.all(dim=-1)
+            crossed_all_detected = (
+                detected_any_after.all(dim=-1)
+                & ~detected_any_before.all(dim=-1)
+                & record_discovery_events
+            )
             if self.all_targets_detected_bonus_requires_no_rescue:
                 if visited_count_before is None:
                     visited_count_before = self.target_visited.float().sum(dim=-1)
-                crossed_all_detected = crossed_all_detected & (visited_count_before <= 0)
+                crossed_all_detected &= visited_count_before <= 0
             detector_count = newly_detected.float().sum(dim=(1, 2)).clamp_min(1.0)
             detector_share = newly_detected.float().sum(dim=-1) / detector_count.unsqueeze(-1)
             per_agent_discovery = per_agent_discovery + (
@@ -922,9 +1060,8 @@ class SarScenario(BaseScenario):
 
     def _refresh_high_level_state(self, env_index: int | None = None) -> None:
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
-        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
         voronoi_masks = self._compute_voronoi_masks(agent_pos)
-        target_pos_per_agent = target_pos.unsqueeze(1).expand(
+        target_pos_per_agent = self.detected_target_positions.unsqueeze(1).expand(
             -1,
             self.n_agents,
             -1,
@@ -939,7 +1076,7 @@ class SarScenario(BaseScenario):
             dim=-1,
         )
         self.detected_targets = torch.where(
-            self.target_detected.unsqueeze(-1),
+            (self.target_detected & ~self.target_visited.unsqueeze(1)).unsqueeze(-1),
             self.detected_targets,
             torch.zeros_like(self.detected_targets),
         )
@@ -1007,7 +1144,7 @@ class SarScenario(BaseScenario):
         return torch.stack(heatmaps, dim=1)
 
     def _target_heatmaps(self) -> Tensor:
-        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        target_pos = self.detected_target_positions
         sigma = max(self.target_radius / 2.0, self.cell_size)
         heatmaps = torch.zeros_like(self.belief_maps)
         for target_index in range(self.n_targets):
@@ -1017,7 +1154,10 @@ class SarScenario(BaseScenario):
             dist_sq = dx.square() + dy.square()
             heat = torch.exp(-dist_sq / (2 * sigma**2))
             heat = torch.where(dist_sq <= self.target_radius**2, heat, torch.zeros_like(heat))
-            visible = self.target_detected[:, :, target_index].unsqueeze(-1).unsqueeze(-1)
+            visible = (
+                self.target_detected[:, :, target_index]
+                & ~self.target_visited[:, target_index].unsqueeze(-1)
+            ).unsqueeze(-1).unsqueeze(-1)
             heatmaps = torch.maximum(heatmaps, heat.unsqueeze(1) * visible.float())
         return heatmaps
 
@@ -1030,10 +1170,15 @@ class SarScenario(BaseScenario):
         )
 
     def _target_claimed(self) -> Tensor:
-        target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
+        target_pos = self.detected_target_positions
         collect_goals = self.assigned_tasks[..., 0] > 0.5
         dists = torch.cdist(self.assigned_goals, target_pos)
-        claimed = ((dists <= self.goal_radius) & collect_goals.unsqueeze(-1)).any(dim=1)
+        known = self.target_detected.any(dim=1) & ~self.target_visited
+        claimed = (
+            (dists <= self.goal_radius)
+            & collect_goals.unsqueeze(-1)
+            & known.unsqueeze(1)
+        ).any(dim=1)
         return claimed.unsqueeze(1).expand(-1, self.n_agents, -1).float()
 
     def _compute_rrt_candidates(

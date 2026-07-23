@@ -435,9 +435,7 @@ class AsyncSMDPCollector:
         agent_positions = torch.stack(
             [agent.state.pos for agent in self.scenario.world.agents], dim=1
         )
-        target_positions = torch.stack(
-            [target.state.pos for target in self.scenario.targets], dim=1
-        )
+        target_positions = self.scenario.detected_target_positions
         agent_target_distance = torch.cdist(agent_positions, target_positions)
         decision = torch.zeros_like(self.scenario.active_agents)
         for env_id, target_id in zip(*torch.nonzero(new_targets, as_tuple=True)):
@@ -843,9 +841,7 @@ class AsyncSMDPCollector:
         agent_positions = torch.stack(
             [agent.state.pos for agent in scenario.world.agents], dim=1
         )
-        target_positions = torch.stack(
-            [target.state.pos for target in scenario.targets], dim=1
-        )
+        target_positions = scenario.detected_target_positions
         collect_task = scenario.assigned_tasks[..., 0].bool()
         assigned_dists = torch.cdist(scenario.assigned_goals, target_positions)
         commitment_valid = (
@@ -972,9 +968,7 @@ class AsyncSMDPCollector:
         env_ids, agent_ids = torch.nonzero(decision_mask, as_tuple=True)
         agent_pos = torch.stack([agent.state.pos for agent in self.env.agents], dim=1)
         agent_vel = torch.stack([agent.state.vel for agent in self.env.agents], dim=1)
-        target_abs_pos = torch.stack(
-            [target.state.pos for target in scenario.targets], dim=1
-        )
+        target_abs_pos = scenario.detected_target_positions
         battery = 1.0 - scenario.world_steps.float() / max(float(scenario.max_steps), 1.0)
         ego_parts = [
             agent_pos,
@@ -1186,7 +1180,7 @@ class AsyncSMDPCollector:
         global_target_id = obs["target_ids"].gather(
             1, target_index.view(-1, 1)
         ).squeeze(1)
-        target_pos = torch.stack([target.state.pos for target in scenario.targets], dim=1)
+        target_pos = scenario.detected_target_positions
         target_goals = target_pos[obs["env_id"].long(), global_target_id]
         is_target = actions >= scenario.rrt_top_k
         return torch.where(is_target.unsqueeze(-1), target_goals, explore_goals), is_target

@@ -126,7 +126,7 @@ class SarFixedIntervalMacroEnv:
         explore_goals = agent_pos + rel_goals
 
         target_index = (actions - scenario.rrt_top_k).clamp(min=0, max=scenario.n_targets - 1)
-        target_pos = torch.stack([target.state.pos for target in scenario.targets], dim=1)
+        target_pos = scenario.detected_target_positions
         target_goals = target_pos[batch_ids, target_index]
 
         is_target = actions >= scenario.rrt_top_k

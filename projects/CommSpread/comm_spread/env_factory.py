@@ -26,6 +26,7 @@ DEFAULT_SCENARIO_CONFIG: dict[str, Any] = {
 
 DEFAULT_SAR_CONFIG: dict[str, Any] = {
     "mode": "debug",
+    "physics_profile": "legacy",
     "emit_info": True,
     "enable_high_level_state": True,
     "n_agents": 3,
@@ -35,6 +36,9 @@ DEFAULT_SAR_CONFIG: dict[str, Any] = {
     "belief_cell_size": 0.02,
     "sensor_radius": 0.3,
     "sensor_fidelity": 0.8,
+    "initial_belief": 0.5,
+    "belief_detection_threshold": 0.95,
+    "belief_include_inactive_agents": True,
     "goal_radius": 0.05,
     "goal_reward": 3.0,
     "rescue_reward": 10.0,
@@ -95,6 +99,23 @@ DEFAULT_SAR_CONFIG: dict[str, Any] = {
     "recent_decision_render_steps": 5,
 }
 
+MPE_STRICT_SAR_OVERRIDES: dict[str, Any] = {
+    "physics_profile": "mpe_strict",
+    "mpe_action_force_scale": 5.0,
+    "world_substeps": 1,
+    "world_collision_force": 100,
+    "world_contact_margin": 0.001,
+    "world_dt": 0.1,
+    "world_drag": 0.25,
+    "world_linear_friction": 0.0,
+    "world_angular_friction": 0.0,
+    "world_hard_bounds": False,
+    "collision_penalty": -20.0,
+    "collision_safe_distance": 0.15,
+    "max_collision_penalty": -20.0,
+    "boundary_penalty": -2.0,
+}
+
 
 def make_comm_spread_env(
     *,
@@ -129,12 +150,26 @@ def make_sar_env(
     device: str = "cpu",
     seed: int = 0,
     max_steps: int | None = None,
-    continuous_actions: bool = True,
+    continuous_actions: bool | None = None,
     **scenario_config: Any,
 ):
-    """Create the VMAS SAR environment."""
+    """Create the VMAS SAR environment with an explicit physics profile."""
 
-    config = DEFAULT_SAR_CONFIG | scenario_config
+    physics_profile = scenario_config.get("physics_profile", "legacy")
+    if physics_profile not in {"legacy", "mpe_strict"}:
+        raise ValueError(f"invalid physics profile: {physics_profile}")
+    profile_config = (
+        MPE_STRICT_SAR_OVERRIDES if physics_profile == "mpe_strict" else {}
+    )
+    config = DEFAULT_SAR_CONFIG | profile_config | scenario_config
+    expected_continuous = physics_profile == "legacy"
+    if continuous_actions is None:
+        continuous_actions = expected_continuous
+    elif continuous_actions != expected_continuous:
+        raise ValueError(
+            f"physics_profile={physics_profile!r} requires "
+            f"continuous_actions={expected_continuous}"
+        )
     if max_steps is not None:
         config["max_steps"] = max_steps
     wrapper_max_steps = config.pop("max_steps", None)

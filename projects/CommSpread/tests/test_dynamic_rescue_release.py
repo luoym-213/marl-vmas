@@ -30,6 +30,9 @@ def _collector(
             [[[True, False, False], [True, False, False], [True, False, False]]]
         ),
         target_visited=torch.zeros(1, 3, dtype=torch.bool),
+        detected_target_positions=torch.tensor(
+            [[[0.5, 0.0], [0.0, 0.0], [0.0, 0.0]]]
+        ),
         assigned_tasks=torch.zeros(1, 3, 1),
         assigned_goals=torch.zeros(1, 3, 2),
         goal_radius=0.05,
