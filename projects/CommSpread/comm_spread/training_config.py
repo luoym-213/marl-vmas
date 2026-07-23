@@ -296,6 +296,24 @@ TASK_VARIANTS: dict[str, dict[str, Any]] = {
     },
 }
 
+TASK_VARIANTS["sar_low_mpe_physics"] = TASK_VARIANTS["sar_low"] | {
+    "physics_profile": "mpe_strict",
+    "continuous_actions": False,
+    "mpe_action_force_scale": 5.0,
+    "world_substeps": 1,
+    "world_collision_force": 100,
+    "world_contact_margin": 0.001,
+    "world_dt": 0.1,
+    "world_drag": 0.25,
+    "world_linear_friction": 0.0,
+    "world_angular_friction": 0.0,
+    "world_hard_bounds": False,
+    "collision_penalty": -20.0,
+    "collision_safe_distance": 0.15,
+    "max_collision_penalty": -20.0,
+    "boundary_penalty": -2.0,
+}
+
 
 def build_experiment_config(
     *,

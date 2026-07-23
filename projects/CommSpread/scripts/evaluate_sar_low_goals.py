@@ -27,10 +27,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Path to a BenchMARL checkpoint produced by sar_low MAPPO training.",
     )
+    parser.add_argument(
+        "--variant",
+        choices=("sar_low", "sar_low_mpe_physics"),
+        default="sar_low",
+    )
     parser.add_argument("--episodes", type=int, default=128)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--save-folder",
+        type=Path,
+        default=Path("outputs/sar_low_goal_eval"),
+    )
+    parser.add_argument("--json-output", type=Path)
     parser.add_argument(
         "--random-baseline",
         action="store_true",
@@ -88,18 +99,18 @@ def find_scenario(env: Any) -> Any:
 
 
 def make_experiment(args: argparse.Namespace) -> Experiment:
-    task_config = dict(TASK_VARIANTS["sar_low"])
+    task_config = dict(TASK_VARIANTS[args.variant])
     if args.max_steps is not None:
         task_config["max_steps"] = args.max_steps
 
     model_config, critic_model_config = build_mlp_configs()
     task = CommSpreadTask.SAR_LOW.update_config(task_config)
-    Path("outputs/sar_low_goal_eval").mkdir(parents=True, exist_ok=True)
+    args.save_folder.mkdir(parents=True, exist_ok=True)
     config = build_experiment_config(
         train_device=args.device,
         sampling_device=args.device,
         quick=True,
-        save_folder="outputs/sar_low_goal_eval",
+        save_folder=str(args.save_folder),
         restore_file=str(args.checkpoint),
         restore_map_location=args.device,
         max_n_frames=1_000,
@@ -252,6 +263,7 @@ def print_metrics(title: str, metrics: dict[str, float]) -> None:
 
 def main() -> None:
     args = parse_args()
+    results: dict[str, dict[str, float]] = {}
     experiment = make_experiment(args)
     try:
         metrics = run_policy_eval(
@@ -262,6 +274,7 @@ def main() -> None:
             render_max_steps=args.render_max_steps,
         )
         print_metrics("trained_policy", metrics)
+        results["trained_policy"] = metrics
     finally:
         experiment.close()
 
@@ -270,8 +283,17 @@ def main() -> None:
         try:
             metrics = run_policy_eval(baseline, random_policy=True)
             print_metrics("random_baseline", metrics)
+            results["random_baseline"] = metrics
         finally:
             baseline.close()
+
+    if args.json_output is not None:
+        import json
+
+        if args.json_output.exists():
+            raise FileExistsError(f"refusing to overwrite {args.json_output}")
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

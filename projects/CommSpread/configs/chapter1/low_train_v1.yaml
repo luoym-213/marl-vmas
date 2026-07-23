@@ -1,0 +1,33 @@
+schema_version: 1
+run_type: low_train
+task_ref: task_final_v1.yaml
+task_version: chapter1_sar_final_v1
+training:
+  entrypoint: scripts/train_mappo.py
+  variant: sar_low_mpe_physics
+  algorithm: MAPPO
+  model: mlp
+  seed: 0
+  max_frames: 50000000
+  collected_frames_per_batch: 60000
+  envs_per_worker: 600
+  minibatch_iters: 45
+  minibatch_size: 4096
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coefficient: 0.01
+  critic_coefficient: 1.0
+  learning_rate: 0.00005
+  actor_hidden_layers: [256, 256]
+  critic_hidden_layers: [256, 256]
+  activation: tanh
+  share_actor_parameters: true
+  share_critic_parameters: true
+  checkpoint_interval_frames: 300000
+  keep_checkpoints: 5
+  evaluation_interval_frames: 120000
+  evaluation_episodes: 200
+  train_device: cuda:0
+  sampling_device: cuda:0
+  output_dir: outputs/chapter1/low_train_v1/seed_0

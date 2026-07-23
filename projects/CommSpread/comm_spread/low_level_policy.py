@@ -32,6 +32,7 @@ class BenchMARLLowLevelPolicy:
         seed: int = 0,
         deterministic: bool = True,
         max_steps: int | None = None,
+        task_variant: str = "sar_low",
         enable_goal_reaching_fallback: bool = False,
         goal_near_threshold: float = 0.25,
         fallback_proportional_gain: float = 2.0,
@@ -42,6 +43,12 @@ class BenchMARLLowLevelPolicy:
         self.device = device
         self.seed = seed
         self.deterministic = deterministic
+        if task_variant not in {"sar_low", "sar_low_mpe_physics"}:
+            raise ValueError(f"unsupported low-level task variant: {task_variant}")
+        self.task_variant = task_variant
+        self.physics_profile = TASK_VARIANTS[task_variant].get(
+            "physics_profile", "legacy"
+        )
         self.enable_goal_reaching_fallback = enable_goal_reaching_fallback
         self.goal_near_threshold = goal_near_threshold
         self.fallback_proportional_gain = fallback_proportional_gain
@@ -57,7 +64,10 @@ class BenchMARLLowLevelPolicy:
 
     @property
     def source(self) -> str:
-        return f"checkpoint:{self.checkpoint}"
+        return (
+            f"checkpoint:{self.checkpoint}"
+            f"[variant={self.task_variant},physics={self.physics_profile}]"
+        )
 
     def close(self) -> None:
         self.experiment.close()
@@ -65,6 +75,12 @@ class BenchMARLLowLevelPolicy:
     @torch.no_grad()
     def __call__(self, env) -> list[Tensor]:
         scenario = env.scenario
+        scenario_profile = getattr(scenario, "physics_profile", "legacy")
+        if scenario_profile != self.physics_profile:
+            raise ValueError(
+                f"low-level variant {self.task_variant!r} expects physics_profile="
+                f"{self.physics_profile!r}, got {scenario_profile!r}"
+            )
         obs = torch.stack(
             [scenario.observation(agent)["obs"] for agent in env.agents],
             dim=1,
@@ -99,7 +115,11 @@ class BenchMARLLowLevelPolicy:
         with set_exploration_type(exploration):
             td = self.experiment.policy(td)
         actions = td.get(("agents", "action"))
-        actions = actions * scenario.active_agents.unsqueeze(-1).float()
+        if actions.ndim == scenario.active_agents.ndim:
+            actions = actions.unsqueeze(-1)
+        actions = torch.where(
+            scenario.active_agents.unsqueeze(-1), actions, torch.zeros_like(actions)
+        )
         if self.enable_goal_reaching_fallback:
             actions = self._apply_goal_reaching_fallback(scenario, actions)
         return [actions[:, agent_index] for agent_index in range(scenario.n_agents)]
@@ -151,11 +171,22 @@ class BenchMARLLowLevelPolicy:
             self._fallback_stagnant_steps >= self.fallback_stagnation_steps
         )
         self._fallback_latched |= trigger & scenario.active_agents
-        fallback_actions = torch.clamp(
-            (goals - positions) * self.fallback_proportional_gain,
-            -1.0,
-            1.0,
-        )
+        delta = goals - positions
+        if getattr(self, "physics_profile", "legacy") == "mpe_strict":
+            horizontal = delta[..., 0].abs() >= delta[..., 1].abs()
+            fallback_actions = torch.zeros_like(actions)
+            action_ids = torch.where(
+                horizontal,
+                torch.where(delta[..., 0] < 0, 1, 2),
+                torch.where(delta[..., 1] < 0, 3, 4),
+            )
+            fallback_actions[..., 0] = action_ids.to(fallback_actions.dtype)
+        else:
+            fallback_actions = torch.clamp(
+                delta * self.fallback_proportional_gain,
+                -1.0,
+                1.0,
+            )
         fallback_mask = self._fallback_latched & scenario.active_agents
         self.fallback_action_count += int(fallback_mask.sum().cpu())
         self.total_action_count += int(scenario.active_agents.sum().cpu())
@@ -167,7 +198,7 @@ class BenchMARLLowLevelPolicy:
         return self.fallback_action_count / max(self.total_action_count, 1)
 
     def _make_experiment(self, *, max_steps: int | None) -> Experiment:
-        task_config: dict[str, Any] = dict(TASK_VARIANTS["sar_low"])
+        task_config: dict[str, Any] = dict(TASK_VARIANTS[self.task_variant])
         if max_steps is not None:
             task_config["max_steps"] = max_steps
         model_config, critic_model_config = build_mlp_configs()
