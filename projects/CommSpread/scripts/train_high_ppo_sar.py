@@ -19,9 +19,21 @@ import torch
 import torch.nn.functional as F
 
 from comm_spread.async_smdp import AsyncSMDPCollector, HighLevelTransition
+from comm_spread.chapter1_config import (
+    chapter1_sar_kwargs,
+    fingerprint_lines,
+    resolve_chapter1_config,
+    save_resolved_config,
+    verify_checkpoint_sha256,
+)
 from comm_spread.env_factory import make_sar_env
 from comm_spread.high_level_policy import HGSARActorCriticPolicy
 from comm_spread.low_level_policy import BenchMARLLowLevelPolicy
+from comm_spread.smdp_returns import (
+    LEGACY_EVENT_STEP,
+    STRICT_SMDP,
+    add_smdp_gae,
+)
 
 try:
     torch.backends.nnpack.enabled = False
@@ -87,6 +99,7 @@ CSV_FIELDS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--chapter1-config", type=Path, default=None)
     parser.add_argument("--low-level-checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--enable-low-level-goal-fallback", action="store_true")
     parser.add_argument("--low-level-goal-near-threshold", type=float, default=0.25)
@@ -106,6 +119,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument(
+        "--high-level-return-mode",
+        choices=(STRICT_SMDP, LEGACY_EVENT_STEP),
+        default=LEGACY_EVENT_STEP,
+    )
+    parser.add_argument("--training-success-terminal", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--environment-continue-after-success", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--exclude-post-success-steps-from-training", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--time-limit-bootstrap", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--value-coef", type=float, default=0.5)
@@ -173,8 +195,114 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def apply_chapter1_config(args: argparse.Namespace):
+    if args.chapter1_config is None:
+        return None
+    resolved = resolve_chapter1_config(args.chapter1_config)
+    if resolved.run_type != "high_train":
+        raise ValueError("--chapter1-config must reference a high_train config")
+    task = resolved.task
+    run = resolved.run["training"]
+    low = run["low_level_checkpoint"]
+    args.low_level_checkpoint = verify_checkpoint_sha256(
+        PROJECT_ROOT / low["path"], low["sha256"]
+    )
+    args.low_level_task_variant = low["variant"]
+    args.low_level_controller = low["controller"]
+    args.physics_profile = task["physics"]["profile"]
+    args.max_steps = task["scenario"]["horizon"]
+    args.sensor_radius = task["perception"]["sensor_radius"]
+    args.retire_on_rescue = task["task_semantics"]["retire_on_rescue"]
+    args.num_envs = run["num_envs"]
+    args.low_level_steps_per_batch = run["low_level_steps_per_batch"]
+    args.updates = run["updates"]
+    args.ppo_epochs = run["ppo_epochs"]
+    args.minibatch_size = run["minibatch_size"]
+    args.gamma = run["gamma_per_low_level_step"]
+    args.gae_lambda = run["gae_lambda"]
+    high_level = run["high_level"]
+    args.high_level_return_mode = high_level["return_mode"]
+    args.training_success_terminal = high_level["training_success_terminal"]
+    args.environment_continue_after_success = high_level["environment_continue_after_success"]
+    args.exclude_post_success_steps_from_training = high_level["exclude_post_success_steps_from_training"]
+    args.time_limit_bootstrap = high_level["time_limit_bootstrap"]
+    args.clip_eps = run["clip_epsilon"]
+    args.entropy_coef = run["entropy_coefficient"]
+    args.value_coef = run["value_coefficient"]
+    args.lr = run["learning_rate"]
+    args.max_grad_norm = run["max_gradient_norm"]
+    args.seed = run["seed"]
+    args.device = run["device"]
+    args.save_folder = Path(run["output_dir"])
+    args.save_interval = run["save_interval_updates"]
+    actor = run["actor"]
+    args.progress_features = actor["progress_features"]
+    args.target_assignment_features = actor["target_assignment_features"]
+    args.enable_commitment_aware_actor = actor["commitment_aware_extension"]
+    args.enable_teammate_intention_coordination = actor[
+        "teammate_intention_coordination"
+    ]
+    args.enable_phase_policy = actor["phase_policy"]
+    args.coordinated_target_selection = actor["coordinated_target_selection"]
+    hierarchy = task["hierarchy"]
+    release = hierarchy["rescue_release"]
+    args.dynamic_rescue_release = release["dynamic_staggered"]
+    args.dynamic_release_min_searchers = release["min_searchers"]
+    args.dynamic_release_entropy_ratio_threshold = release["entropy_ratio_threshold"]
+    args.dynamic_release_entropy_rate_threshold = release["entropy_rate_threshold"]
+    args.dynamic_release_min_stagnation_step = release["min_stagnation_step"]
+    args.dynamic_release_search_steps_per_target = release["search_steps_per_target"]
+    args.dynamic_release_speed_per_step = release["assumed_speed_per_step"]
+    args.dynamic_release_time_margin = release["time_margin"]
+    args.dynamic_release_max_new_agents_per_event = release["max_new_agents_per_event"]
+    args.dynamic_rescue_only_after_all_detected = release["only_after_all_targets_detected"]
+    args.redecide_on_detection_change = hierarchy["replanning"]["on_detection_change"]
+    args.redecide_on_assignment_change = hierarchy["replanning"]["on_assignment_change"]
+    args.enable_finder_first_cascade = hierarchy["finder_first"]["enabled"]
+    args.finder_cascade_mode = hierarchy["finder_first"]["cascade_mode"]
+    fallback = task["low_level_interface"]["execution"]["stagnation_fallback"]
+    args.enable_low_level_goal_fallback = fallback["enabled"]
+    args.low_level_goal_near_threshold = fallback["near_threshold"]
+    args.low_level_fallback_stagnation_steps = fallback["stagnation_steps"]
+    args.low_level_fallback_progress_epsilon = fallback["progress_epsilon"]
+    args.task_version = task["task_version"]
+    args.task_config_sha256 = resolved.task_config_sha256
+    explicitly_forwarded = {
+        "physics_profile",
+        "mode",
+        "emit_info",
+        "enable_high_level_state",
+        "enable_rrt_candidates",
+        "auto_resample_goals",
+        "sensor_radius",
+        "max_steps",
+        "retire_on_rescue",
+        "dynamic_rescue_release",
+        "dynamic_release_min_searchers",
+        "dynamic_release_entropy_ratio_threshold",
+        "dynamic_release_entropy_rate_threshold",
+        "dynamic_release_min_stagnation_step",
+        "dynamic_release_search_steps_per_target",
+        "dynamic_release_speed_per_step",
+        "dynamic_release_time_margin",
+        "dynamic_release_max_new_agents_per_event",
+        "dynamic_rescue_only_after_all_detected",
+        "redecide_on_detection_change",
+        "redecide_on_assignment_change",
+        "enable_finder_first_cascade",
+        "finder_cascade_mode",
+    }
+    args.chapter1_env_kwargs = {
+        key: value
+        for key, value in chapter1_sar_kwargs(task, mode="high").items()
+        if key not in explicitly_forwarded
+    }
+    return resolved
+
+
 def main() -> None:
     args = parse_args()
+    chapter1 = apply_chapter1_config(args)
     if args.low_level_controller == "proportional" and args.enable_low_level_goal_fallback:
         raise ValueError(
             "low-level goal fallback applies only to the checkpoint controller"
@@ -217,6 +345,9 @@ def main() -> None:
         )
     torch.manual_seed(args.seed)
     args.save_folder.mkdir(parents=True, exist_ok=True)
+    if chapter1 is not None:
+        save_resolved_config(chapter1, args.save_folder)
+        print("\n".join(fingerprint_lines(chapter1)), flush=True)
     checkpoint_dir = args.save_folder / "checkpoints"
     scalars_dir = args.save_folder / "scalars"
     texts_dir = args.save_folder / "texts"
@@ -241,6 +372,8 @@ def main() -> None:
 
     env = make_sar_env(
         num_envs=args.num_envs,
+        physics_profile=getattr(args, "physics_profile", "legacy"),
+        **getattr(args, "chapter1_env_kwargs", {}),
         device=args.device,
         seed=args.seed,
         mode="high",
@@ -304,6 +437,7 @@ def main() -> None:
             deterministic=True,
             max_steps=scenario.max_steps,
             enable_goal_reaching_fallback=args.enable_low_level_goal_fallback,
+            task_variant=getattr(args, "low_level_task_variant", "sar_low"),
             goal_near_threshold=args.low_level_goal_near_threshold,
             fallback_proportional_gain=args.low_level_fallback_gain,
             fallback_stagnation_steps=args.low_level_fallback_stagnation_steps,
@@ -336,13 +470,22 @@ def main() -> None:
     optimizer = torch.optim.Adam(high_policy.parameters(), lr=args.lr)
     start_update = 0
     if args.resume_checkpoint is not None:
-        start_update = load_checkpoint(args.resume_checkpoint, high_policy, optimizer, args.device)
+        start_update = load_checkpoint(
+            args.resume_checkpoint, high_policy, optimizer, args.device,
+            expected_return_mode=args.high_level_return_mode,
+            expected_task_config_sha256=getattr(args, "task_config_sha256", None),
+        )
 
     collector = AsyncSMDPCollector(
         env,
         high_level_policy=high_policy,
         low_level_policy=low_policy,
         coordinated_target_selection=args.coordinated_target_selection,
+        gamma=args.gamma,
+        return_mode=args.high_level_return_mode,
+        training_success_terminal=args.training_success_terminal,
+        environment_continue_after_success=args.environment_continue_after_success,
+        exclude_post_success_steps_from_training=args.exclude_post_success_steps_from_training,
     )
 
     try:
@@ -373,7 +516,11 @@ def main() -> None:
                 continue
 
             batch = transitions_to_batch(transitions, device=args.device)
-            add_gae(batch, gamma=args.gamma, gae_lambda=args.gae_lambda)
+            add_gae(
+                batch, gamma=args.gamma, gae_lambda=args.gae_lambda,
+                return_mode=args.high_level_return_mode,
+                time_limit_bootstrap=args.time_limit_bootstrap,
+            )
             update_metrics = ppo_update(
                 policy=high_policy,
                 optimizer=optimizer,
@@ -454,6 +601,13 @@ def transitions_to_batch(
         "old_value": stack("value").float().view(-1, 1),
         "reward": stack("reward").float().view(-1, 1),
         "done": stack("done").float().view(-1, 1),
+        "terminal": stack("terminal").float().view(-1, 1),
+        "task_success_terminal": stack("task_success_terminal").float().view(-1, 1),
+        "environment_done": stack("environment_done").float().view(-1, 1),
+        "time_limit_truncated": stack("time_limit_truncated").float().view(-1, 1),
+        "train_active_mask": stack("train_active_mask").float().view(-1, 1),
+        "agent_terminal": stack("agent_terminal").float().view(-1, 1),
+        "next_value": stack("next_value").float().view(-1, 1),
         "duration": torch.tensor(
             [transition.duration for transition in transitions],
             dtype=torch.float32,
@@ -477,40 +631,32 @@ def transitions_to_batch(
     }
 
 
-def add_gae(batch: dict[str, torch.Tensor], *, gamma: float, gae_lambda: float) -> None:
-    n = batch["reward"].shape[0]
-    advantages = torch.zeros(n, 1, device=batch["reward"].device)
-    returns = torch.zeros_like(advantages)
-    env_ids = batch["env_id"]
-    agent_ids = batch["agent_id"]
-    starts = batch["decision_start_t"]
+def add_gae(
+    batch: dict[str, torch.Tensor], *, gamma: float, gae_lambda: float,
+    return_mode: str = LEGACY_EVENT_STEP, time_limit_bootstrap: bool = False,
+) -> None:
+    add_smdp_gae(
+        batch, gamma=gamma, gae_lambda=gae_lambda, return_mode=return_mode,
+        time_limit_bootstrap=time_limit_bootstrap,
+    )
 
-    for env_id in env_ids.unique():
-        for agent_id in agent_ids[env_ids == env_id].unique():
-            mask = (env_ids == env_id) & (agent_ids == agent_id)
-            indices = torch.nonzero(mask, as_tuple=False).view(-1)
-            if indices.numel() == 0:
-                continue
-            indices = indices[starts[indices].argsort()]
-            next_value = torch.zeros(1, 1, device=batch["reward"].device)
-            next_advantage = torch.zeros(1, 1, device=batch["reward"].device)
-            for idx in reversed(indices.tolist()):
-                done_mask = 1.0 - batch["done"][idx : idx + 1]
-                discount = gamma ** batch["duration"][idx : idx + 1]
-                delta = (
-                    batch["reward"][idx : idx + 1]
-                    + discount * next_value * done_mask
-                    - batch["old_value"][idx : idx + 1]
-                )
-                advantage = delta + discount * gae_lambda * next_advantage * done_mask
-                advantages[idx : idx + 1] = advantage
-                returns[idx : idx + 1] = advantage + batch["old_value"][idx : idx + 1]
-                next_value = batch["old_value"][idx : idx + 1]
-                next_advantage = advantage
 
-    batch["advantage"] = advantages
-    batch["return"] = returns
 
+def select_train_active_batch(
+    batch: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Remove all masked tail/padding rows before any PPO loss is evaluated."""
+
+    valid = batch["train_active_mask"].bool().view(-1)
+    original_n = batch["action"].shape[0]
+    if bool(valid.all()):
+        return batch
+    return {
+        key: value[valid]
+        if value.ndim > 0 and value.shape[0] == original_n
+        else value
+        for key, value in batch.items()
+    }
 
 def ppo_update(
     *,
@@ -526,7 +672,10 @@ def ppo_update(
     intent_loss_coef: float,
 ) -> dict[str, float]:
     policy.train()
+    batch = select_train_active_batch(batch)
     n = batch["action"].shape[0]
+    if n == 0:
+        raise ValueError("PPO batch contains no train-active high-level transitions")
     advantages = batch["advantage"]
     advantages = (advantages - advantages.mean()) / advantages.std().clamp_min(1e-8)
     metrics: dict[str, list[float]] = {
@@ -739,8 +888,26 @@ def load_checkpoint(
     policy: HGSARActorCriticPolicy,
     optimizer: torch.optim.Optimizer,
     device: str,
+    *,
+    expected_return_mode: str = LEGACY_EVENT_STEP,
+    expected_task_config_sha256: str | None = None,
 ) -> int:
     checkpoint: dict[str, Any] = torch.load(path, map_location=device, weights_only=False)
+    config = checkpoint.get("config", {})
+    if expected_return_mode == STRICT_SMDP:
+        required = {
+            "high_level_return_mode": STRICT_SMDP,
+            "training_success_terminal": True,
+            "environment_continue_after_success": True,
+            "exclude_post_success_steps_from_training": True,
+        }
+        for key, expected in required.items():
+            if config.get(key) != expected:
+                raise ValueError(
+                    f"strict SMDP resume rejected: checkpoint {key}={config.get(key)!r}, expected {expected!r}"
+                )
+        if expected_task_config_sha256 is not None and config.get("task_config_sha256") != expected_task_config_sha256:
+            raise ValueError("strict SMDP resume rejected: task_config_sha256 mismatch")
     policy.load_state_dict(checkpoint["policy_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return int(checkpoint.get("update", 0))
