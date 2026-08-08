@@ -16,6 +16,15 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_DIR = PROJECT_ROOT / "configs" / "chapter1"
 FINAL_TASK_VERSION = "chapter1_sar_final_v1"
+IMMEDIATE_OPEN_TASK_VERSION = "chapter1_sar_immediate_open_v1"
+SUPPORTED_TASK_VERSIONS = frozenset({
+    FINAL_TASK_VERSION,
+    IMMEDIATE_OPEN_TASK_VERSION,
+})
+TASK_VERSION_CASCADE_MODES = {
+    FINAL_TASK_VERSION: "finder_only",
+    IMMEDIATE_OPEN_TASK_VERSION: "immediate_open",
+}
 
 PROGRAM_DEFAULTS: dict[str, dict[str, Any]] = {
     "low_train": {"restore_file": None, "restore_map_location": None},
@@ -177,9 +186,18 @@ def config_sha256(value: Any, *, exclude_volatile: bool = False) -> str:
 def validate_task(task: Mapping[str, Any]) -> None:
     for path in REQUIRED_TASK_PATHS:
         _get_dotted(task, path)
-    if task["task_version"] != FINAL_TASK_VERSION:
+    task_version = task["task_version"]
+    if task_version not in SUPPORTED_TASK_VERSIONS:
         raise Chapter1ConfigError(
-            f"expected task_version={FINAL_TASK_VERSION!r}, got {task['task_version']!r}"
+            f"unsupported Chapter 1 task_version={task_version!r}; "
+            f"expected one of {sorted(SUPPORTED_TASK_VERSIONS)!r}"
+        )
+    cascade_mode = _get_dotted(task, "hierarchy.finder_first.cascade_mode")
+    expected_cascade_mode = TASK_VERSION_CASCADE_MODES[task_version]
+    if cascade_mode != expected_cascade_mode:
+        raise Chapter1ConfigError(
+            f"task_version={task_version!r} requires "
+            f"hierarchy.finder_first.cascade_mode={expected_cascade_mode!r}"
         )
     profile = _get_dotted(task, "physics.profile")
     continuous = _get_dotted(task, "physics.action_space.continuous")

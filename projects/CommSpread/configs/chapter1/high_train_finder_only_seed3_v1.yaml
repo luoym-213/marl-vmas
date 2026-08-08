@@ -1,0 +1,50 @@
+# Chapter 1 strict-SMDP high-level training role configuration.
+schema_version: 1
+run_type: high_train
+task_ref: task_final_v1.yaml
+task_version: chapter1_sar_final_v1
+training:
+  entrypoint: scripts/train_high_ppo_sar.py
+  algorithm: asynchronous_smdp_ppo
+  policy: hgsar_graph_actor_map_critic
+  seed: 3
+  num_envs: 16
+  low_level_steps_per_batch: 400
+  updates: 200
+  ppo_epochs: 4
+  minibatch_size: 512
+  gamma_per_low_level_step: 0.99
+  gae_lambda: 0.95
+  high_level:
+    execution_mode: event_triggered_async
+    return_mode: strict_smdp
+    gae_duration_mode: environment_time
+    training_success_terminal: true
+    environment_continue_after_success: true
+    exclude_post_success_steps_from_training: true
+    time_limit_bootstrap: true
+    recurrent_state_mode: feedforward_empty
+  clip_epsilon: 0.2
+  entropy_coefficient: 0.01
+  value_coefficient: 0.5
+  learning_rate: 0.0003
+  max_gradient_norm: 0.5
+  device: cuda:0
+  save_interval_updates: 10
+  base_eval_config: configs/chapter1/eval_v1.yaml
+  output_dir: outputs/chapter1/high_train_v1/seed_3
+  actor:
+    deterministic_during_training: false
+    progress_features: false
+    target_assignment_features: false
+    commitment_aware_extension: false
+    teammate_intention_coordination: false
+    phase_policy: false
+    coordinated_target_selection: false
+  low_level_checkpoint:
+    controller: checkpoint
+    path: outputs/sar_low_mpe_physics/full_seed_0_20260722/mappo_sar_low_mlp__0ab21273_26_07_22-09_25_34/checkpoints/checkpoint_50040000.pt
+    sha256: 4cc80182f328238eb59c2562ad0483710499061674dbcff9dedeca9319594029
+    variant: sar_low_mpe_physics
+    physics_profile: mpe_strict
+    metadata_policy: legacy_checkpoint_sha256_and_runtime_profile_guard

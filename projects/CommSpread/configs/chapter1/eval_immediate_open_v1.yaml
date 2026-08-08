@@ -1,0 +1,31 @@
+schema_version: 1
+run_type: eval
+task_ref: task_immediate_open_v1.yaml
+task_version: chapter1_sar_immediate_open_v1
+evaluation:
+  entrypoint: scripts/analyze_sar_failure_modes_mpe_physics.py
+  policy: hgsar
+  deterministic_high_level: true
+  deterministic_low_level: true
+  device: cuda:0
+  seeds: [0, 1]
+  episodes_per_seed: 256
+  total_episodes: 512
+  paired_layout_protocol: true
+  output_dir: outputs/chapter1/eval_immediate_open_v1
+  high_level_checkpoint:
+    path: outputs/chapter1/REPLACE_WITH_IMMEDIATE_OPEN_CHECKPOINT.pt
+    sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    provenance: template_replaced_by_retrospective_selection
+  low_level_checkpoint:
+    path: outputs/sar_low_mpe_physics/full_seed_0_20260722/mappo_sar_low_mlp__0ab21273_26_07_22-09_25_34/checkpoints/checkpoint_50040000.pt
+    sha256: 4cc80182f328238eb59c2562ad0483710499061674dbcff9dedeca9319594029
+    variant: sar_low_mpe_physics
+    physics_profile: mpe_strict
+    metadata_policy: legacy_checkpoint_sha256_and_runtime_profile_guard
+  reporting:
+    save_episode_rows: true
+    save_failure_reasons: true
+    save_layout_hash: true
+    paired_bootstrap_samples: 100000
+    paired_bootstrap_seed: 20260722

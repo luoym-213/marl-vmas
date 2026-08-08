@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from comm_spread.chapter1_config import (
     Chapter1ConfigError,
     FINAL_TASK_VERSION,
+    IMMEDIATE_OPEN_TASK_VERSION,
     chapter1_sar_kwargs,
     config_sha256,
     resolve_chapter1_config,
@@ -69,6 +70,54 @@ def test_low_high_eval_resolve_identical_task_core() -> None:
     assert chapter1_sar_kwargs(resolved[0].task, mode="high") == chapter1_sar_kwargs(
         resolved[2].task, mode="high"
     )
+
+
+def test_immediate_open_task_and_role_configs_are_consistent() -> None:
+    task = _resolve("task_immediate_open_v1.yaml")
+    assert task.task["task_version"] == IMMEDIATE_OPEN_TASK_VERSION
+    assert task.task["hierarchy"]["finder_first"]["cascade_mode"] == "immediate_open"
+
+    roles = [
+        _resolve("eval_immediate_open_v1.yaml"),
+        *[
+            _resolve(f"high_train_immediate_open_seed{seed}_v1.yaml")
+            for seed in range(5)
+        ],
+    ]
+    assert {item.task_config_sha256 for item in roles} == {
+        task.task_config_sha256
+    }
+    assert [item.run["training"]["seed"] for item in roles[1:]] == list(range(5))
+    assert all(
+        item.run["training"]["base_eval_config"]
+        == "configs/chapter1/eval_immediate_open_v1.yaml"
+        for item in roles[1:]
+    )
+
+    original = _resolve("task_final_v1.yaml")
+    assert task.task_config_sha256 != original.task_config_sha256
+    changed = deepcopy(original.task)
+    changed["task_version"] = IMMEDIATE_OPEN_TASK_VERSION
+    changed["hierarchy"]["finder_first"]["cascade_mode"] = "immediate_open"
+    assert task.task == changed
+
+
+def test_paired_finder_only_seed_configs_preserve_frozen_task() -> None:
+    original = _resolve("task_final_v1.yaml")
+    roles = [
+        _resolve(f"high_train_finder_only_seed{seed}_v1.yaml")
+        for seed in range(1, 5)
+    ]
+    assert {item.task_config_sha256 for item in roles} == {
+        original.task_config_sha256
+    }
+    assert [item.run["training"]["seed"] for item in roles] == [1, 2, 3, 4]
+
+
+def test_task_version_rejects_mismatched_cascade_semantics() -> None:
+    task = deepcopy(_resolve("task_final_v1.yaml").task)
+    task["hierarchy"]["finder_first"]["cascade_mode"] = "immediate_open"
+    _expect_config_error(lambda: validate_task(task), "requires hierarchy.finder_first")
 
 
 def test_mpe_strict_rejects_continuous_actions() -> None:

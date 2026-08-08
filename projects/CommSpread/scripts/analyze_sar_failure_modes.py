@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-finder-first-cascade", action="store_true")
     parser.add_argument(
         "--finder-cascade-mode",
-        choices=("finder_only", "immediate", "one_event"),
+        choices=("finder_only", "immediate", "immediate_open", "one_event"),
         default="immediate",
     )
     parser.add_argument("--early-rescue-penalty", type=float, default=0.0)

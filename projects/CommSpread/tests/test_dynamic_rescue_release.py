@@ -144,6 +144,47 @@ def test_immediate_rejection_diffuses_on_next_event_once() -> None:
     assert not bool(second.any())
 
 
+def test_immediate_open_rejection_opens_without_forcing_redecision() -> None:
+    collector = _cascade_collector("immediate_open")
+    collector.scenario.last_new_target_finders[0, 0, 0] = True
+    collector._register_new_finders(torch.zeros(1, 3, dtype=torch.bool))
+    collector._update_finder_cascades_after_decision(
+        torch.tensor([[True, False, False]])
+    )
+
+    assert collector._cascade_stage[0, 0] == 2
+    assert not bool(collector._cascade_force_mask.any())
+    decision = collector._advance_finder_cascades(
+        torch.tensor([[True, False, False]]),
+        torch.zeros(1, 3, dtype=torch.bool),
+    )
+    assert not bool(decision.any())
+    events = [event["event"] for event in collector.cascade_events[0]]
+    assert events == ["finder_open", "reject", "diffuse"]
+
+
+def test_immediate_open_preserves_finder_priority_at_terminal_detection() -> None:
+    collector = _cascade_collector("immediate_open")
+    collector.scenario.target_detected[:] = True
+    collector.scenario.last_new_target_finders[0, 2, 0] = True
+    decision = collector._register_new_finders(
+        torch.zeros(1, 3, dtype=torch.bool)
+    )
+    assert decision.tolist() == [[False, False, True]]
+    assert collector._cascade_stage[0, 0] == 0
+    assert not bool(collector._cascade_force_mask.any())
+
+
+def test_immediate_open_unavailable_finder_opens_without_interrupting_team() -> None:
+    collector = _cascade_collector("immediate_open")
+    collector.scenario.last_new_target_finders[0, 0, 0] = True
+    commitment = torch.tensor([[True, False, False]])
+    decision = collector._register_new_finders(commitment)
+    assert not bool(decision.any())
+    assert collector._cascade_stage[0, 0] == 2
+    assert not bool(collector._cascade_force_mask.any())
+
+
 def test_one_event_rejection_waits_one_intervening_event() -> None:
     collector = _cascade_collector("one_event")
     collector.scenario.last_new_target_finders[0, 1, 0] = True

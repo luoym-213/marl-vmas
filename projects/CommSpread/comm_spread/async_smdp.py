@@ -482,12 +482,14 @@ class AsyncSMDPCollector:
                         "event": "finder_unavailable",
                     }
                 )
-                decision[env_id] |= self._schedule_cascade_diffusion(
+                eligible = self._schedule_cascade_diffusion(
                     env_index, target_index, defer_decision=False
                 )
+                if self.scenario.finder_cascade_mode != "immediate_open":
+                    decision[env_id] |= eligible
             if bool(
                 self.scenario.target_detected[env_id].any(dim=0).all()
-            ):
+            ) and self.scenario.finder_cascade_mode != "immediate_open":
                 # Terminal rescue phase takes precedence over finder waiting:
                 # the staggered gate still exposes at most one new commitment.
                 decision[env_id] |= self._schedule_cascade_diffusion(
@@ -543,6 +545,14 @@ class AsyncSMDPCollector:
             mode = self.scenario.finder_cascade_mode
             if mode == "immediate":
                 self._schedule_cascade_diffusion(env_index, target_index)
+            elif mode == "immediate_open":
+                # Open the rejected target to the team immediately without
+                # manufacturing a decision epoch. Other UAVs retain their
+                # current options and see the target when they next decide
+                # because stage 2 grants team-wide target permission.
+                self._schedule_cascade_diffusion(
+                    env_index, target_index, defer_decision=False
+                )
             elif mode == "one_event":
                 self._cascade_stage[env_id, target_id] = 1
                 self._cascade_wait[env_id, target_id] = 2

@@ -106,6 +106,7 @@ class SarScenario(BaseScenario):
         if self.finder_cascade_mode not in {
             "finder_only",
             "immediate",
+            "immediate_open",
             "one_event",
         }:
             raise ValueError(f"invalid finder cascade mode: {self.finder_cascade_mode}")

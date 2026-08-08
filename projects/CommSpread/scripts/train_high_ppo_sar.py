@@ -179,7 +179,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-finder-first-cascade", action="store_true")
     parser.add_argument(
         "--finder-cascade-mode",
-        choices=("finder_only", "immediate", "one_event"),
+        choices=("finder_only", "immediate", "immediate_open", "one_event"),
         default="immediate",
     )
     parser.add_argument("--early-rescue-penalty", type=float, default=0.0)
@@ -254,6 +254,14 @@ def apply_chapter1_config(args: argparse.Namespace):
     args.device = run["device"]
     args.save_folder = Path(run["output_dir"])
     args.save_interval = run["save_interval_updates"]
+    args.base_eval_config = PROJECT_ROOT / run.get(
+        "base_eval_config", "configs/chapter1/eval_v1.yaml"
+    )
+    base_eval = resolve_chapter1_config(args.base_eval_config)
+    if base_eval.task_config_sha256 != resolved.task_config_sha256:
+        raise ValueError(
+            "high_train base_eval_config must reference the same Chapter 1 task"
+        )
     actor = run["actor"]
     args.progress_features = actor["progress_features"]
     args.target_assignment_features = actor["target_assignment_features"]
@@ -1139,7 +1147,7 @@ def write_derived_eval_config(args, records, windows) -> Path:
     best = max(records[1:], key=lambda item: (
         item["success_rate"], item["detect_all_rate"], rewards[item["update"]], -item["update"],
     ))
-    source = PROJECT_ROOT / "configs/chapter1/eval_v1.yaml"
+    source = args.base_eval_config
     document = yaml.safe_load(source.read_text(encoding="utf-8"))
     checkpoint = args.save_folder / best["checkpoint"]
     document["evaluation"]["high_level_checkpoint"] = {
