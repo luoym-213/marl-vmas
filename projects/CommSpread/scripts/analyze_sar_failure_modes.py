@@ -15,6 +15,11 @@ from typing import Any
 
 import torch
 
+from comm_spread.chapter1_eval_metrics import (
+    build_fixed_evaluation_metrics,
+    format_fixed_evaluation_metrics,
+    write_fixed_evaluation_metrics,
+)
 from comm_spread.async_smdp import AsyncSMDPCollector, TargetFirstPolicy
 from comm_spread.env_factory import make_sar_env
 from comm_spread.high_level_policy import HGSARActorCriticPolicy
@@ -602,6 +607,9 @@ def run(
         (n_envs, args.steps), torch.nan, device=device
     )
     gate_open_trace = torch.full_like(active_searcher_trace, -1)
+    global_entropy_trace = torch.full(
+        (n_envs, args.steps + 1), torch.nan, device=device
+    )
     gate_events: list[list[dict[str, Any]]] = [[] for _ in range(n_envs)]
     assignment_quality_events: list[list[dict[str, Any]]] = [
         [] for _ in range(n_envs)
@@ -617,6 +625,10 @@ def run(
         # and gating evaluations receive exactly the same initial layouts.
         torch.manual_seed(args.seed)
         collector.reset()
+        initial_detected = scenario.target_detected.any(dim=1)
+        discovered_first_step = torch.where(
+            initial_detected, torch.zeros_like(discovered_first_step), discovered_first_step
+        )
         if coverage_tracker is not None:
             coverage_tracker.start()
         initial_agents = stack_agent_positions(scenario).detach().clone().cpu().contiguous()
@@ -627,7 +639,12 @@ def run(
             hashlib.sha256(initial_layout[env_id].numpy().tobytes()).hexdigest()
             for env_id in range(n_envs)
         ]
-        entropy_initial = scenario._compute_entropy(scenario.belief_maps).sum(dim=(-1, -2, -3)).detach().clone()
+        entropy_initial_maps = scenario._compute_entropy(scenario.belief_maps)
+        entropy_initial = entropy_initial_maps.sum(dim=(-1, -2, -3)).detach().clone()
+        global_entropy_trace[:, 0] = (
+            entropy_initial_maps.min(dim=1).values.sum(dim=(-1, -2))
+        )
+        executed_steps = 0
         for step in range(args.steps):
             pre_detected = scenario.target_detected.any(dim=1).detach().clone()
             pre_visited = scenario.target_visited.detach().clone()
@@ -681,10 +698,13 @@ def run(
             active_search = scenario.active_agents & ~active_collect
             active_searcher_trace[:, step] = active_search.sum(dim=-1)
             committed_rescuer_trace[:, step] = active_collect.sum(dim=-1)
-            entropy_now_by_agent = scenario._compute_entropy(
-                scenario.belief_maps
-            ).sum(dim=(-1, -2))
+            entropy_maps_now = scenario._compute_entropy(scenario.belief_maps)
+            entropy_now_by_agent = entropy_maps_now.sum(dim=(-1, -2))
             entropy_trace[:, step] = entropy_now_by_agent.sum(dim=-1)
+            global_entropy_trace[:, step + 1] = (
+                entropy_maps_now.min(dim=1).values.sum(dim=(-1, -2))
+            )
+            executed_steps = step + 1
 
             first_now = (detected_count >= 1) & (first_detection_step < 0)
             second_now = (detected_count >= 2) & (second_detection_step < 0)
@@ -908,6 +928,10 @@ def run(
                 break
 
         entropy_final = scenario._compute_entropy(scenario.belief_maps).sum(dim=(-1, -2, -3))
+        if executed_steps < args.steps:
+            global_entropy_trace[:, executed_steps + 1 :] = (
+                global_entropy_trace[:, executed_steps].unsqueeze(-1)
+            )
         coverage_rows = (
             coverage_tracker.rows() if coverage_tracker is not None else None
         )
@@ -960,6 +984,7 @@ def run(
             gate_open_trace=gate_open_trace,
             gate_events=gate_events,
             assignment_quality_events=assignment_quality_events,
+            global_entropy_trace=global_entropy_trace,
             finder_cascade_events=collector.cascade_events,
             layout_sha256=layout_sha256,
             per_env_layout_sha256=per_env_layout_sha256,
@@ -1015,6 +1040,12 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
         active_count = int(active[env_id].item())
         retired_count = int(retired[env_id].item())
         all_step = int(kwargs["all_detected_step"][env_id].item())
+        discovery_steps = kwargs["discovered_first_step"][env_id]
+        last_target_detection_time = (
+            int(discovery_steps.max().item())
+            if bool((discovery_steps >= 0).all())
+            else -1
+        )
         remaining_at_all = int(kwargs["all_detected_remaining_steps"][env_id].item())
         workload_at_all = float(
             kwargs["rescue_workload_steps_at_all_detected"][env_id].cpu()
@@ -1200,6 +1231,10 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
                     kwargs["first_assignment_step"][env_id],
                     kwargs["visited_first_step"][env_id],
                 ),
+                "rescue_response_time": mean_pair_delay(
+                    kwargs["discovered_first_step"][env_id],
+                    kwargs["visited_first_step"][env_id],
+                ),
                 "assignment_quality_event_count": len(quality_events),
                 "crossing_event_count": sum(
                     int(int(event["crossing_pair_count"]) > 0)
@@ -1302,12 +1337,16 @@ def build_rows(**kwargs: Any) -> list[dict[str, float | int | str]]:
                 "gate_open_trace": kwargs["gate_open_trace"][
                     env_id, :trace_length
                 ].cpu().tolist(),
+                "global_entropy_trace": kwargs["global_entropy_trace"][
+                    env_id
+                ].cpu().tolist(),
                 "gate_events": kwargs["gate_events"][env_id],
                 "first_discovery_step_mean": mean_positive(kwargs["discovered_first_step"][env_id]),
                 "first_visit_step_mean": mean_positive(kwargs["visited_first_step"][env_id]),
                 "last_visit_step": int(kwargs["visited_first_step"][env_id].max().cpu()),
                 "success_step": int(kwargs["visited_first_step"][env_id].max().cpu()) if success else -1,
                 "min_active_distance_to_unvisited_target": finite_mean(min_active_target_dist[env_id][~visited[env_id]]),
+                "last_target_detection_time": last_target_detection_time,
             }
         )
         if kwargs["coverage_rows"] is not None:
@@ -1612,10 +1651,21 @@ def reproducibility_metadata(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def write_outputs(args: argparse.Namespace, rows: list[dict[str, float | int | str]], summary: dict[str, float | int | str]) -> None:
+def write_outputs(
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> tuple[dict[str, Any], Path]:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.csv_output.parent.mkdir(parents=True, exist_ok=True)
     args.markdown.parent.mkdir(parents=True, exist_ok=True)
+    fixed_metrics = build_fixed_evaluation_metrics(
+        rows,
+        seed=args.seed,
+        horizon=args.steps,
+        physics_dt=getattr(args, "physics_dt", None),
+    )
+    fixed_metrics_path = args.output.parent / "evaluation_metrics.json"
     args.output.write_text(
         json.dumps(
             {
@@ -1773,6 +1823,9 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, float | int | s
     lines.append("- `detected_unvisited_remaining` means at least one target was known but not rescued before timeout.")
     lines.append("- `no_active_agents_for_search` or `no_active_agents_for_detected_target` indicates retirement removed all remaining search/rescue capacity.")
     args.markdown.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_fixed_evaluation_metrics(fixed_metrics, fixed_metrics_path)
+    return fixed_metrics, fixed_metrics_path
+
 
 
 def main() -> None:
@@ -1830,9 +1883,11 @@ def main() -> None:
         )
     torch.manual_seed(args.seed)
     rows, summary = run(args)
-    write_outputs(args, rows, summary)
+    fixed_metrics, fixed_metrics_path = write_outputs(args, rows, summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     print(f"wrote {args.output}")
+    print(format_fixed_evaluation_metrics(fixed_metrics))
+    print(f"wrote {fixed_metrics_path}")
     print(f"wrote {args.csv_output}")
     print(f"wrote {args.markdown}")
 

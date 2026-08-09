@@ -81,6 +81,7 @@ def main() -> None:
             PROJECT_ROOT / high["path"], high["sha256"]
         )
         args.physics_profile = task["physics"]["profile"]
+        args.physics_dt = task["physics"]["dt"]
         args.low_level_task_variant = low["variant"]
         args.max_steps = task["scenario"]["horizon"]
         args.steps = task["scenario"]["horizon"]
