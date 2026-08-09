@@ -15,7 +15,6 @@ from typing import Any
 
 os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
 
-import yaml
 import torch
 import torch.nn.functional as F
 
@@ -528,15 +527,14 @@ def main() -> None:
 
     validation_windows = []
     diagnostic_windows = []
-    validation_records = []
     if chapter1 is not None:
         initial_checkpoint = checkpoint_dir / "checkpoint_0.pt"
         save_checkpoint(initial_checkpoint, high_policy, optimizer, 0, args)
-        window, record = run_validation_window(
+        window, _ = run_validation_window(
             args=args, chapter1=chapter1, policy=high_policy, update=0,
             checkpoint=initial_checkpoint, high_reward_mean=0.0,
         )
-        validation_windows.append(window); validation_records.append(record)
+        validation_windows.append(window)
     try:
         for update in range(start_update + 1, args.updates + 1):
             high_policy.reset_stats()
@@ -612,18 +610,15 @@ def main() -> None:
                 bound_checkpoint = checkpoint_dir / f"checkpoint_{update}.pt"
                 if not bound_checkpoint.exists():
                     save_checkpoint(bound_checkpoint, high_policy, optimizer, update, args)
-                window, record = run_validation_window(
+                window, _ = run_validation_window(
                     args=args, chapter1=chapter1, policy=high_policy, update=update,
                     checkpoint=bound_checkpoint, high_reward_mean=float(rollout_metrics["high_reward_mean"]),
                 )
                 validation_windows.append(window)
-                validation_records.append(record)
                 decision = evaluate_training_health(validation_windows, diagnostic_windows)
                 append_jsonl(args.save_folder / "health_decisions.jsonl", {
                     "update": update, "status": decision.status, "reason": decision.reason,
                 })
-                if decision.passed_for_final_evaluation:
-                    write_derived_eval_config(args, validation_records, validation_windows)
                 if decision.early_stop_failed:
                     write_run_summary(run_summary_path, args=args, status="early_stop_failed", final_update=update, last_metrics=all_metrics, latest_checkpoint=checkpoint_dir / "latest.pt")
                     break
@@ -1139,26 +1134,6 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, sort_keys=True) + "\n")
-
-
-
-def write_derived_eval_config(args, records, windows) -> Path:
-    rewards = {item.update: item.high_reward_mean for item in windows}
-    best = max(records[1:], key=lambda item: (
-        item["success_rate"], item["detect_all_rate"], rewards[item["update"]], -item["update"],
-    ))
-    source = args.base_eval_config
-    document = yaml.safe_load(source.read_text(encoding="utf-8"))
-    checkpoint = args.save_folder / best["checkpoint"]
-    document["evaluation"]["high_level_checkpoint"] = {
-        "path": str(checkpoint.relative_to(PROJECT_ROOT)),
-        "sha256": best["checkpoint_sha256"],
-        "provenance": "strict_smdp_random_init",
-    }
-    destination = args.save_folder / "derived_eval_v1.yaml"
-    destination.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-    return destination
-
 
 
 if __name__ == "__main__":
