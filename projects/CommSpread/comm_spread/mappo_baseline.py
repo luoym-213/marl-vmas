@@ -30,6 +30,9 @@ DEFAULT_REWARD_CONFIG = {
     "profile": "sparse_v1",
     "discovery_entropy_scale": 1.0,
     "detected_target_progress_scale": 0.0,
+    "assignment_mode": "none",
+    "assignment_progress_scale": 0.0,
+    "rescue_base_by_order": None,
     "collision_coefficient": None,
     "collision_floor": None,
     "boundary_penalty": None,
@@ -91,9 +94,17 @@ def _validate_baseline_config(config: Mapping[str, Any]) -> None:
     if config["baseline"].get("critic_information") != "team_observable_state_only":
         raise ValueError("critic must exclude hidden target truth")
     reward = config["_reward"]
-    if reward["profile"] not in {"sparse_v1", "observable_dense_v2"}:
+    if reward["profile"] not in {
+        "sparse_v1",
+        "observable_dense_v2",
+        "higsar_aligned_assignment_v1",
+    }:
         raise ValueError("unsupported baseline reward profile")
-    for key in ("discovery_entropy_scale", "detected_target_progress_scale"):
+    for key in (
+        "discovery_entropy_scale",
+        "detected_target_progress_scale",
+        "assignment_progress_scale",
+    ):
         value = float(reward[key])
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"baseline.reward.{key} must be finite and nonnegative")
@@ -114,6 +125,40 @@ def _validate_baseline_config(config: Mapping[str, Any]) -> None:
         ):
             if float(reward[key]) > 0.0:
                 raise ValueError(f"baseline.reward.{key} must be nonpositive")
+    if reward["profile"] == "higsar_aligned_assignment_v1":
+        if reward["assignment_mode"] != "minimum_distance_one_to_one":
+            raise ValueError(
+                "aligned assignment profile requires minimum_distance_one_to_one"
+            )
+        if float(reward["discovery_entropy_scale"]) != 1.0:
+            raise ValueError(
+                "aligned assignment profile must preserve discovery reward"
+            )
+        if float(reward["detected_target_progress_scale"]) != 0.0:
+            raise ValueError(
+                "aligned assignment profile forbids nearest-target shaping"
+            )
+        if float(reward["assignment_progress_scale"]) != 5.0:
+            raise ValueError(
+                "aligned assignment profile fixes assignment scale at 5.0"
+            )
+        fixed_rewards = {
+            "rescue_base_by_order": 20.0,
+            "collision_coefficient": -0.2,
+            "collision_floor": -0.2,
+            "boundary_penalty": -0.05,
+            "active_time_penalty": 0.01,
+        }
+        for key, expected_value in fixed_rewards.items():
+            value = reward[key]
+            if (
+                value is None
+                or not math.isfinite(float(value))
+                or float(value) != expected_value
+            ):
+                raise ValueError(
+                    f"aligned assignment profile fixes {key} at {expected_value}"
+                )
 
 
 def make_mappo_baseline_env(
@@ -142,17 +187,30 @@ def make_mappo_baseline_env(
             "direct_target_progress_scale": float(
                 reward["detected_target_progress_scale"]
             ),
+            "direct_assignment_mode": reward["assignment_mode"],
+            "direct_assignment_progress_scale": float(
+                reward["assignment_progress_scale"]
+            ),
+            # Hierarchical flags are present in the shared frozen task, but
+            # must be explicitly inert for this direct physical baseline.
+            "dynamic_rescue_release": False,
+            "dynamic_rescue_only_after_all_detected": False,
+            "redecide_on_detection_change": False,
+            "redecide_on_assignment_change": False,
+            "enable_finder_first_cascade": False,
         }
     )
-    if reward["profile"] == "observable_dense_v2":
-        kwargs.update(
-            {
-                "collision_penalty": float(reward["collision_coefficient"]),
-                "max_collision_penalty": float(reward["collision_floor"]),
-                "boundary_penalty": float(reward["boundary_penalty"]),
-                "time_penalty": float(reward["active_time_penalty"]),
-            }
-        )
+    reward_overrides = {
+        "rescue_base_by_order": "rescue_reward",
+        "collision_coefficient": "collision_penalty",
+        "collision_floor": "max_collision_penalty",
+        "boundary_penalty": "boundary_penalty",
+        "active_time_penalty": "time_penalty",
+    }
+    for reward_key, scenario_key in reward_overrides.items():
+        value = reward[reward_key]
+        if value is not None:
+            kwargs[scenario_key] = float(value)
     return make_sar_env(
         num_envs=num_envs,
         device=device,
@@ -381,6 +439,14 @@ def checkpoint_metadata(config: Mapping[str, Any]) -> dict[str, Any]:
         "task_version": config["_task"]["task_version"],
         "task_config_sha256": config["_task_sha256"],
         "reward_profile": config["_reward"]["profile"],
+        "reward_shaping": {
+            "assignment_mode": config["_reward"]["assignment_mode"],
+            "assignment_progress_scale": float(
+                config["_reward"]["assignment_progress_scale"]
+            ),
+            "uses_hidden_target_truth": False,
+        },
+        "rescue_semantics": "automatic_proximity_rescue_of_detected_targets",
         "baseline_config_sha256": config["_config_sha256"],
         "information_boundary": {
             "target_observation": "team_persistent_detected_only",
@@ -409,8 +475,15 @@ def validate_checkpoint_metadata(
                 f"expected {expected[key]!r}, got {metadata.get(key)!r}"
             )
 
-    if expected["reward_profile"] == "observable_dense_v2":
+    if expected["reward_profile"] in {
+        "observable_dense_v2",
+        "higsar_aligned_assignment_v1",
+    }:
         if metadata.get("reward_profile") != expected["reward_profile"]:
             raise ValueError(
                 "checkpoint metadata mismatch for reward_profile"
             )
+    if expected["reward_profile"] == "higsar_aligned_assignment_v1":
+        for key in ("reward_shaping", "rescue_semantics"):
+            if metadata.get(key) != expected[key]:
+                raise ValueError(f"checkpoint metadata mismatch for {key}")

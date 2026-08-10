@@ -108,10 +108,29 @@ DENSE_V2_RADIUS_SPECS = tuple(
         ("100", "1.0", 1.0),
     )
 )
+ASSIGNMENT_PRIOR_RADIUS_SPECS = tuple(
+    RadiusSpec(
+        code,
+        label,
+        value,
+        config_filename=(
+            f"baseline_mappo_assignment_prior_r{code}_seed0_v1.yaml"
+        ),
+        output_family="mappo_assignment_prior",
+    )
+    for code, label, value in (
+        ("030", "0.3", 0.3),
+        ("040", "0.4", 0.4),
+        ("050", "0.5", 0.5),
+    )
+)
 EXPERIMENT_SETS = {
     "current": RADIUS_REGISTRY,
     "dense-v2": {
         spec.code: spec for spec in DENSE_V2_RADIUS_SPECS
+    },
+    "assignment-prior": {
+        spec.code: spec for spec in ASSIGNMENT_PRIOR_RADIUS_SPECS
     },
 }
 

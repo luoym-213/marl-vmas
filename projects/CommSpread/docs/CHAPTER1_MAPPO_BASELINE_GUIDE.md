@@ -28,7 +28,7 @@
 - actor 使用 ego 位置/速度/active/time、通信半径内的 UAV 消息，以及团队已经持久化检测且尚未救援的目标质心；
 - actor 与 centralized critic 均不能读取未检测目标的真实位置；
 - 目标被团队检测后，活动 UAV 物理进入 rescue radius 即可救援，随后沿用 frozen task 的 UAV retirement；
-- direct 模式取消随机 assigned-goal 距离奖励；推荐的 `observable_dense_v2` 由发现/熵增益、朝已检测目标的进度、救援、时间、碰撞和越界项组成；
+- direct 模式取消随机 assigned-goal 距离奖励；公平强基线使用与 HIG-SAR 完全相同的基础环境奖励，只额外加入明确声明的一对一 assignment-progress shaping；
 - 物理、出生分布、Bayesian belief、检测阈值、100 步 horizon、退休规则和五指标均来自相同 Chapter 1 task YAML。
 
 这意味着旧命令中的 `mask-obs-dist` 不再是第二套几何真值过滤器。观测半径由 frozen task 的
@@ -43,13 +43,13 @@
 - `configs/chapter1/baseline_mappo_r040_seed0_v1.yaml`
 - `configs/chapter1/baseline_mappo_r050_seed0_v1.yaml`
 
-正式受控对比使用隔离的 dense-v2 模板：
+历史 dense-v2 实验使用以下隔离模板（保留用于复现，不再作为公平主对比）：
 
 - `configs/chapter1/baseline_mappo_reward_v2_r030_seed0_v1.yaml`
 - `configs/chapter1/baseline_mappo_reward_v2_r040_seed0_v1.yaml`
 - `configs/chapter1/baseline_mappo_reward_v2_r050_seed0_v1.yaml`
 
-三个 dense-v2 模板的奖励、网络和 PPO 参数完全相同，只改变 frozen task 的 sensor radius。
+三个历史 dense-v2 模板的奖励、网络和 PPO 参数完全相同，只改变 frozen task 的 sensor radius。
 它们分别引用现有的 `task_immediate_open_r030/r040/r050_v1.yaml`。这里任务文件中的
 `immediate_open` 只用于复用完全相同的环境参数；端到端 MAPPO 不调用该 FCSR 机制。
 
@@ -205,9 +205,9 @@ outputs/chapter1_baselines/mappo/radius_sweep/<batch-id>/
 `train_done`。可通过 `BARK_BASE_URL` 环境变量或 `--bark-base-url` 修改通知地址。
 通知发送失败只记录 warning，不改变训练、评估状态。
 
-## 8. dense-v2 受控半径对比
+## 8. 历史 dense-v2 半径对比
 
-旧命令默认仍使用 sparse-v1，以保证历史批次可以恢复。正式 dense-v2 三半径对比必须显式指定实验集：
+旧命令默认仍使用 sparse-v1，以保证历史批次可以恢复。复现 dense-v2 三半径实验必须显式指定实验集：
 
 ```bash
 PYTHONPATH=. python scripts/run_mappo_baseline_radius_sweep.py \
@@ -223,3 +223,39 @@ boundary −0.05、active time penalty 0.01 和 PPO entropy coefficient 0.001。
 
 三个半径全部成功后，批次目录额外生成 `radius_comparison.json`，其中包含每个半径的配置哈希、
 选中 checkpoint、1000 回合固定五指标完整数据和 seed 0/1 合并后的策略诊断。最终测试 seed 不参与选模。
+
+## 9. 公平强 MAPPO：HIG-SAR 对齐基础奖励 + assignment prior
+
+论文主对比使用以下配置，而不是 dense-v2：
+
+- `configs/chapter1/baseline_mappo_assignment_prior_r030_seed0_v1.yaml`
+- `configs/chapter1/baseline_mappo_assignment_prior_r040_seed0_v1.yaml`
+- `configs/chapter1/baseline_mappo_assignment_prior_r050_seed0_v1.yaml`
+
+profile `higsar_aligned_assignment_v1` 使用按救援顺序递增的 20/40/60 奖励、
+collision coefficient/floor −0.2、boundary −0.05 和 active time penalty 0.01。
+它不启用 low-level goal reward，也不启用 dense-v2 的 nearest-detected-target progress。
+唯一额外奖励为 `r_assignment(i,t) = 5 * (d_previous(i,t) - d_current(i,t))`。
+
+每一步仅对转换开始前已被团队检测且尚未救援的目标和 active UAV 做确定性最小总距离
+一对一匹配。未匹配 UAV 奖励为 0；相同总代价按 UAV/目标编号的字典序稳定打破平局。
+新发现目标到下一环境步才可参与匹配，未检测目标真值不参与匹配或奖励。
+
+这是公开声明的人工任务分配先验。策略仍逐步直接输出五类物理动作，自行学习搜索与趋近；
+不使用 RRT、option、assigned goal、低层导航器、FCSR、finder-first、commitment 或动态释放。
+救援采用 automatic proximity rescue：任一 active UAV 进入已检测目标的 rescue radius 即
+完成救援并按 frozen task 退休。checkpoint 与 evaluation JSON 均记录 shaping 和 rescue 语义。
+
+预检命令：
+
+```bash
+PYTHONPATH=. python scripts/run_mappo_baseline_radius_sweep.py \\
+  --experiment-set assignment-prior \\
+  --radii 030,040,050 \\
+  --batch-id mappo-assignment-prior-tuned-reward-seed0-v1 \\
+  --device cuda:0 --dry-run
+```
+
+移除 `--dry-run` 即执行连续训练、validation 选模、seed 0/1 各 500 回合评估和 pooled 五指标。
+结果写入 `outputs/chapter1_baselines/mappo_assignment_prior/r<radius>/seed0/runs/`。
+三个半径必须共用相同 assignment 系数与 PPO 参数，不得按半径调奖励。

@@ -239,6 +239,14 @@ def main() -> None:
         "hidden_target_truth": False,
         "hierarchy_used": False,
         "reward_profile": config["_reward"]["profile"],
+        "reward_shaping": {
+            "assignment_mode": config["_reward"]["assignment_mode"],
+            "assignment_progress_scale": float(
+                config["_reward"]["assignment_progress_scale"]
+            ),
+            "uses_hidden_target_truth": False,
+        },
+        "rescue_semantics": "automatic_proximity_rescue_of_detected_targets",
     }
     metrics_path = write_fixed_evaluation_metrics(
         metrics, output_dir / "evaluation_metrics.json"

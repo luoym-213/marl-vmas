@@ -556,3 +556,18 @@ def test_dense_v2_experiment_set_uses_controlled_radius_configs():
         assert config["_reward"]["profile"] == "observable_dense_v2"
         assert config["_reward"]["detected_target_progress_scale"] == 5.0
         assert config["training"]["entropy_coefficient"] == 0.001
+
+
+def test_assignment_prior_experiment_set_uses_aligned_configs():
+    specs = sweep.resolve_radius_specs("030,040,050", "assignment-prior")
+    assert [spec.code for spec in specs] == ["030", "040", "050"]
+    assert all(spec.output_family == "mappo_assignment_prior" for spec in specs)
+    information = sweep.preflight_configs(specs)
+    assert list(information) == ["030", "040", "050"]
+    for spec in specs:
+        config = load_mappo_baseline_config(spec.config)
+        reward = config["_reward"]
+        assert reward["profile"] == "higsar_aligned_assignment_v1"
+        assert reward["detected_target_progress_scale"] == 0.0
+        assert reward["assignment_mode"] == "minimum_distance_one_to_one"
+        assert reward["assignment_progress_scale"] == 5.0

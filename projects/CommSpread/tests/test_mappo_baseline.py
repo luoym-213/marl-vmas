@@ -28,6 +28,11 @@ DENSE_CONFIG = (
     / "configs/chapter1/baseline_mappo_reward_v2_r100_seed0_v1.yaml"
 )
 
+ASSIGNMENT_CONFIG = (
+    PROJECT_ROOT
+    / "configs/chapter1/baseline_mappo_assignment_prior_r030_seed0_v1.yaml"
+)
+
 def make_env():
     config = load_mappo_baseline_config(CONFIG)
     env = make_mappo_baseline_env(
@@ -200,4 +205,82 @@ def test_dense_checkpoint_requires_reward_profile_provenance():
     else:
         raise AssertionError(
             "dense checkpoint without reward profile was accepted"
+
         )
+
+def make_assignment_env():
+    config = load_mappo_baseline_config(ASSIGNMENT_CONFIG)
+    env = make_mappo_baseline_env(
+        config, num_envs=1, device="cpu", seed=13
+    )
+    env.reset()
+    return config, env
+
+
+def test_assignment_profile_uses_tuned_rewards_and_disables_hierarchy():
+    config, env = make_assignment_env()
+    scenario = env.scenario
+    assert config["_reward"]["profile"] == "higsar_aligned_assignment_v1"
+    assert scenario.discovery_reward == 1.0
+    assert scenario.rescue_reward == 20.0
+    assert scenario.collision_penalty == -0.2
+    assert scenario.max_collision_penalty == -0.2
+    assert scenario.boundary_penalty == -0.05
+    assert scenario.time_penalty == 0.01
+    assert scenario.direct_target_progress_scale == 0.0
+    assert scenario.direct_assignment_progress_scale == 5.0
+    assert scenario.direct_rescue
+    assert not scenario.dynamic_rescue_release
+    assert not scenario.redecide_on_detection_change
+    assert not scenario.redecide_on_assignment_change
+    assert not scenario.enable_finder_first_cascade
+
+
+def test_assignment_progress_is_one_to_one_and_ignores_hidden_targets():
+    _, env = make_assignment_env()
+    scenario = env.scenario
+    scenario.target_detected.zero_()
+    scenario.target_visited.zero_()
+    scenario.target_detected[:, :, :2] = True
+    scenario.detected_target_positions[:] = torch.tensor(
+        [[[-0.5, 0.0], [0.5, 0.0], [0.0, 0.0]]]
+    )
+    scenario.previous_direct_agent_positions[:] = torch.tensor(
+        [[[-0.8, 0.0], [0.8, 0.0], [0.0, 0.8]]]
+    )
+    current = torch.tensor(
+        [[-0.7, 0.0], [0.7, 0.0], [0.0, 0.7]]
+    )
+    for index, agent in enumerate(scenario.world.agents):
+        agent.set_pos(current[index].unsqueeze(0), batch_index=None)
+
+    before = scenario._direct_assignment_progress_rewards()
+    assert torch.allclose(before, torch.tensor([[0.5, 0.5, 0.0]]))
+    scenario.targets[2].set_pos(
+        torch.tensor([[0.99, -0.99]]), batch_index=None
+    )
+    after_hidden_truth_change = scenario._direct_assignment_progress_rewards()
+    assert torch.equal(before, after_hidden_truth_change)
+
+
+def test_assignment_reward_components_sum_and_metadata_are_auditable():
+    config, env = make_assignment_env()
+    env.step([torch.zeros(1, dtype=torch.long) for _ in range(3)])
+    scenario = env.scenario
+    assert torch.allclose(
+        sum(scenario.direct_reward_components.values()),
+        scenario.agent_rewards,
+    )
+    checkpoint = {"metadata": checkpoint_metadata(config)}
+    assert checkpoint["metadata"]["reward_shaping"] == {
+        "assignment_mode": "minimum_distance_one_to_one",
+        "assignment_progress_scale": 5.0,
+        "uses_hidden_target_truth": False,
+    }
+    checkpoint["metadata"]["reward_shaping"]["assignment_progress_scale"] = 4.0
+    try:
+        validate_checkpoint_metadata(checkpoint, config)
+    except ValueError as error:
+        assert "reward_shaping" in str(error)
+    else:
+        raise AssertionError("tampered assignment metadata was accepted")

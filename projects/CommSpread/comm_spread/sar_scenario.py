@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typing
+from itertools import combinations, permutations
 from typing import Dict, List
 
 import numpy as np
@@ -191,7 +192,11 @@ class SarScenario(BaseScenario):
         self.direct_reward_profile = kwargs.pop(
             "direct_reward_profile", "sparse_v1"
         )
-        if self.direct_reward_profile not in {"sparse_v1", "observable_dense_v2"}:
+        if self.direct_reward_profile not in {
+            "sparse_v1",
+            "observable_dense_v2",
+            "higsar_aligned_assignment_v1",
+        }:
             raise ValueError(
                 f"invalid direct reward profile: {self.direct_reward_profile}"
             )
@@ -201,6 +206,21 @@ class SarScenario(BaseScenario):
         self.direct_target_progress_scale = kwargs.pop(
             "direct_target_progress_scale", 0.0
         )
+        self.direct_assignment_mode = kwargs.pop(
+            "direct_assignment_mode", "none"
+        )
+        if self.direct_assignment_mode not in {
+            "none",
+            "minimum_distance_one_to_one",
+        }:
+            raise ValueError(
+                f"invalid direct assignment mode: {self.direct_assignment_mode}"
+            )
+        self.direct_assignment_progress_scale = float(
+            kwargs.pop("direct_assignment_progress_scale", 0.0)
+        )
+        if self.direct_assignment_progress_scale < 0.0:
+            raise ValueError("direct assignment progress scale must be nonnegative")
         self.auto_resample_goals = kwargs.pop("auto_resample_goals", True)
         self.done_when_all_targets_visited = kwargs.pop(
             "done_when_all_targets_visited",
@@ -397,6 +417,7 @@ class SarScenario(BaseScenario):
             for name in (
                 "distance_progress",
                 "discovery_entropy",
+                "assignment_progress",
                 "rescue",
                 "collision",
                 "boundary",
@@ -756,9 +777,17 @@ class SarScenario(BaseScenario):
         direct_progress_reward = torch.zeros_like(distance_reward)
         if self.direct_rescue:
             direct_progress_reward = self._direct_target_progress_rewards()
+        direct_assignment_reward = torch.zeros_like(distance_reward)
+        if self.direct_rescue:
+            direct_assignment_reward = self._direct_assignment_progress_rewards()
         active_float = self.active_agents.float()
         time_reward = -self.time_penalty * active_float
-        rewards = distance_reward + direct_progress_reward + time_reward
+        rewards = (
+            distance_reward
+            + direct_progress_reward
+            + direct_assignment_reward
+            + time_reward
+        )
 
         collision_penalty = self._collision_penalties()
         boundary_penalty = self._boundary_penalties()
@@ -796,6 +825,9 @@ class SarScenario(BaseScenario):
             )
             self.direct_reward_components["discovery_entropy"].copy_(
                 scaled_discovery_reward
+            )
+            self.direct_reward_components["assignment_progress"].copy_(
+                direct_assignment_reward
             )
             self.direct_reward_components["rescue"].copy_(rescue_reward)
             self.direct_reward_components["collision"].copy_(collision_penalty)
@@ -851,6 +883,69 @@ class SarScenario(BaseScenario):
             self.direct_target_progress_scale * progress,
             rewards,
         )
+
+    def _direct_assignment_progress_rewards(self) -> Tensor:
+        """Progress under a deterministic observable one-to-one assignment."""
+
+        rewards = torch.zeros_like(self.agent_rewards)
+        if (
+            self.direct_assignment_mode == "none"
+            or self.direct_assignment_progress_scale == 0.0
+        ):
+            return rewards
+
+        # This snapshot is deliberately taken before rescue and discovery updates
+        # for the current transition. Hidden or newly discovered targets cannot
+        # influence either the matching or its reward.
+        known = self.target_detected.any(dim=1) & ~self.target_visited
+        if not known.any():
+            return rewards
+
+        current_positions = torch.stack(
+            [agent.state.pos for agent in self.world.agents], dim=1
+        )
+        target_positions = self.detected_target_positions
+        previous_distances = torch.cdist(
+            self.previous_direct_agent_positions, target_positions
+        )
+        current_distances = torch.cdist(current_positions, target_positions)
+
+        for env_index in range(self.world.batch_dim):
+            agent_ids = torch.nonzero(
+                self.active_agents[env_index], as_tuple=False
+            ).flatten().tolist()
+            target_ids = torch.nonzero(
+                known[env_index], as_tuple=False
+            ).flatten().tolist()
+            pair_count = min(len(agent_ids), len(target_ids))
+            if pair_count == 0:
+                continue
+
+            best_pairs = None
+            best_cost = float("inf")
+            for selected_agents in combinations(agent_ids, pair_count):
+                for selected_targets in permutations(target_ids, pair_count):
+                    pairs = tuple(zip(selected_agents, selected_targets))
+                    cost = sum(
+                        float(previous_distances[env_index, agent_id, target_id])
+                        for agent_id, target_id in pairs
+                    )
+                    # combinations/permutations traverse sorted ids, so keeping
+                    # the first minimum gives a stable lexicographic tie break.
+                    if cost < best_cost - 1e-12:
+                        best_cost = cost
+                        best_pairs = pairs
+
+            assert best_pairs is not None
+            for agent_id, target_id in best_pairs:
+                progress = (
+                    previous_distances[env_index, agent_id, target_id]
+                    - current_distances[env_index, agent_id, target_id]
+                )
+                rewards[env_index, agent_id] = (
+                    self.direct_assignment_progress_scale * progress
+                )
+        return rewards
 
     def _goal_distances(self) -> Tensor:
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
