@@ -184,6 +184,23 @@ class SarScenario(BaseScenario):
         self.boundary_penalty = kwargs.pop("boundary_penalty", -5.0)
         self.time_penalty = kwargs.pop("time_penalty", 0.0)
         self.retire_on_rescue = kwargs.pop("retire_on_rescue", True)
+        # End-to-end baselines do not own a high-level assignment interface.
+        # In this mode a detected target is rescued by physical proximity,
+        # without manufacturing an assigned goal or collect option.
+        self.direct_rescue = kwargs.pop("direct_rescue", False)
+        self.direct_reward_profile = kwargs.pop(
+            "direct_reward_profile", "sparse_v1"
+        )
+        if self.direct_reward_profile not in {"sparse_v1", "observable_dense_v2"}:
+            raise ValueError(
+                f"invalid direct reward profile: {self.direct_reward_profile}"
+            )
+        self.direct_discovery_reward_scale = kwargs.pop(
+            "direct_discovery_reward_scale", 1.0
+        )
+        self.direct_target_progress_scale = kwargs.pop(
+            "direct_target_progress_scale", 0.0
+        )
         self.auto_resample_goals = kwargs.pop("auto_resample_goals", True)
         self.done_when_all_targets_visited = kwargs.pop(
             "done_when_all_targets_visited",
@@ -372,6 +389,20 @@ class SarScenario(BaseScenario):
         self.high_rewards = torch.zeros_like(self.agent_rewards)
         self.success = torch.zeros(batch_dim, dtype=torch.bool, device=device)
         self.world_steps = torch.zeros(batch_dim, dtype=torch.long, device=device)
+        self.previous_direct_agent_positions = torch.zeros(
+            batch_dim, self.n_agents, 2, device=device
+        )
+        self.direct_reward_components = {
+            name: torch.zeros_like(self.agent_rewards)
+            for name in (
+                "distance_progress",
+                "discovery_entropy",
+                "rescue",
+                "collision",
+                "boundary",
+                "time",
+            )
+        }
 
     def reset_world_at(self, env_index: int | None = None) -> None:
         ScenarioUtils.spawn_entities_randomly(
@@ -400,6 +431,14 @@ class SarScenario(BaseScenario):
         self.success[batch_slice] = False
         self.world_steps[batch_slice] = 0
         self.belief_maps[batch_slice] = self.initial_belief
+        current_positions = torch.stack(
+            [agent.state.pos for agent in self.world.agents], dim=1
+        )
+        self.previous_direct_agent_positions[batch_slice] = current_positions[
+            batch_slice
+        ]
+        for component in self.direct_reward_components.values():
+            component[batch_slice] = 0.0
 
         # Match MPE reset semantics: the shared team map receives one sensor
         # update before the first high-level decision. One positive update is
@@ -705,12 +744,21 @@ class SarScenario(BaseScenario):
     def _compute_step_rewards(self) -> None:
         self.recent_decision_ttl = torch.clamp(self.recent_decision_ttl - 1, min=0)
         goal_dist = self._goal_distances()
-        self.goal_done = (goal_dist <= self.goal_radius) & self.active_agents
+        if self.direct_rescue:
+            self.goal_done.zero_()
+        else:
+            self.goal_done = (goal_dist <= self.goal_radius) & self.active_agents
 
         distance_reward = self.distance_reward_scale * (self.previous_goal_dist - goal_dist)
         distance_reward = torch.where(self.active_agents, distance_reward, torch.zeros_like(distance_reward))
+        if self.direct_rescue:
+            distance_reward.zero_()
+        direct_progress_reward = torch.zeros_like(distance_reward)
+        if self.direct_rescue:
+            direct_progress_reward = self._direct_target_progress_rewards()
         active_float = self.active_agents.float()
-        rewards = distance_reward - self.time_penalty * active_float
+        time_reward = -self.time_penalty * active_float
+        rewards = distance_reward + direct_progress_reward + time_reward
 
         collision_penalty = self._collision_penalties()
         boundary_penalty = self._boundary_penalties()
@@ -725,7 +773,14 @@ class SarScenario(BaseScenario):
             active_count_before=active_count_before,
             visited_count_before=visited_count_before,
         )
-        rewards = rewards + rescue_reward + self.goal_reward * self.goal_done.float()
+        rewards = rewards + rescue_reward
+        if self.direct_rescue:
+            scaled_discovery_reward = (
+                self.direct_discovery_reward_scale * discovery_reward
+            )
+            rewards = rewards + scaled_discovery_reward
+        if not self.direct_rescue:
+            rewards = rewards + self.goal_reward * self.goal_done.float()
 
         self.high_rewards = (
             discovery_reward
@@ -735,6 +790,17 @@ class SarScenario(BaseScenario):
             - self.time_penalty
         ) * active_float
         self.agent_rewards = rewards
+        if self.direct_rescue:
+            self.direct_reward_components["distance_progress"].copy_(
+                direct_progress_reward
+            )
+            self.direct_reward_components["discovery_entropy"].copy_(
+                scaled_discovery_reward
+            )
+            self.direct_reward_components["rescue"].copy_(rescue_reward)
+            self.direct_reward_components["collision"].copy_(collision_penalty)
+            self.direct_reward_components["boundary"].copy_(boundary_penalty)
+            self.direct_reward_components["time"].copy_(time_reward)
 
         if self.auto_resample_goals:
             resample_mask = self.goal_done & self.active_agents
@@ -742,9 +808,49 @@ class SarScenario(BaseScenario):
                 self._sample_goals(resample_mask)
 
         self.previous_goal_dist = self._goal_distances()
+        self.previous_direct_agent_positions.copy_(
+            torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
+        )
         self.world_steps += 1
         self.success = torch.all(self.target_visited, dim=-1)
         self._refresh_high_level_state()
+
+    def _direct_target_progress_rewards(self) -> Tensor:
+        """Potential progress to the nearest observable, unvisited target."""
+
+        rewards = torch.zeros_like(self.agent_rewards)
+        if self.direct_target_progress_scale == 0:
+            return rewards
+        known = self.target_detected.any(dim=1) & ~self.target_visited
+        if not known.any():
+            return rewards
+        current_positions = torch.stack(
+            [agent.state.pos for agent in self.world.agents], dim=1
+        )
+        target_positions = self.detected_target_positions
+        previous_distances = torch.cdist(
+            self.previous_direct_agent_positions, target_positions
+        )
+        current_distances = torch.cdist(current_positions, target_positions)
+        mask = known.unsqueeze(1)
+        previous_min = previous_distances.masked_fill(~mask, torch.inf).min(
+            dim=-1
+        ).values
+        current_min = current_distances.masked_fill(~mask, torch.inf).min(
+            dim=-1
+        ).values
+        valid = (
+            known.any(dim=-1).unsqueeze(-1)
+            & self.active_agents
+            & torch.isfinite(previous_min)
+            & torch.isfinite(current_min)
+        )
+        progress = previous_min - current_min
+        return torch.where(
+            valid,
+            self.direct_target_progress_scale * progress,
+            rewards,
+        )
 
     def _goal_distances(self) -> Tensor:
         agent_pos = torch.stack([agent.state.pos for agent in self.world.agents], dim=1)
@@ -880,6 +986,9 @@ class SarScenario(BaseScenario):
         return rewards
 
     def _rescue_rewards(self) -> Tensor:
+        if self.direct_rescue:
+            return self._direct_rescue_rewards()
+
         rewards = torch.zeros_like(self.agent_rewards)
         target_pos = torch.stack([target.state.pos for target in self.targets], dim=1)
         detected_count = self.target_detected.any(dim=1).float().sum(dim=-1)
@@ -910,6 +1019,52 @@ class SarScenario(BaseScenario):
                     self.target_visited[:, target_index] |= new_visit
                     if self.retire_on_rescue:
                         self.active_agents[:, agent_index] &= ~new_visit
+        return rewards
+
+    def _direct_rescue_rewards(self) -> Tensor:
+        """Rescue detected targets for a non-hierarchical physical policy.
+
+        The policy is never given target ground truth. Eligibility uses the
+        persistent, team-shared detection state and physical proximity. Agent
+        and target iteration order only resolves the measure-zero case where
+        multiple agents enter the same rescue radius in one simulator step.
+        """
+
+        rewards = torch.zeros_like(self.agent_rewards)
+        agent_pos = torch.stack(
+            [agent.state.pos for agent in self.world.agents], dim=1
+        )
+        target_pos = torch.stack(
+            [target.state.pos for target in self.targets], dim=1
+        )
+        distances = torch.cdist(agent_pos, target_pos)
+        known = self.target_detected.any(dim=1)
+        detected_count = known.float().sum(dim=-1)
+
+        for agent_index in range(self.n_agents):
+            for target_index in range(self.n_targets):
+                new_visit = (
+                    self.active_agents[:, agent_index]
+                    & known[:, target_index]
+                    & ~self.target_visited[:, target_index]
+                    & (distances[:, agent_index, target_index] <= self.goal_radius)
+                )
+                if not new_visit.any():
+                    continue
+                rescue_order = self.target_visited.float().sum(dim=-1) + 1.0
+                rescue_value = self.rescue_reward * rescue_order
+                if self.early_rescue_penalty > 0:
+                    early_rescue = detected_count < float(
+                        self.early_rescue_detected_threshold
+                    )
+                    rescue_value = (
+                        rescue_value
+                        - self.early_rescue_penalty * early_rescue.float()
+                    )
+                rewards[:, agent_index] += rescue_value * new_visit.float()
+                self.target_visited[:, target_index] |= new_visit
+                if self.retire_on_rescue:
+                    self.active_agents[:, agent_index] &= ~new_visit
         return rewards
 
     def _update_beliefs_and_discoveries(

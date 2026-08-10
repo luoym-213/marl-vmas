@@ -1,0 +1,48 @@
+schema_version: 1
+baseline:
+  name: end_to_end_mappo
+  policy: shared_parameter_entity_message_passing_actor
+  target_observation: team_persistent_detected_only
+  critic_information: team_observable_state_only
+  decision_timescale: every_environment_step
+  model:
+    hidden_dim: 64
+    action_dim: 5
+    message_passing_rounds: 3
+    communication_radius: 2.0
+  reward:
+    profile: observable_dense_v2
+    discovery_entropy_scale: 1.0
+    detected_target_progress_scale: 5.0
+    collision_coefficient: -0.2
+    collision_floor: -0.2
+    boundary_penalty: -0.05
+    active_time_penalty: 0.01
+
+task_config: task_immediate_open_r050_v1.yaml
+
+training:
+  seed: 0
+  device: cuda:0
+  num_envs: 16
+  rollout_steps: 100
+  updates: 200
+  ppo_epochs: 4
+  minibatch_size: 512
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coefficient: 0.001
+  value_coefficient: 0.5
+  learning_rate: 0.0003
+  max_grad_norm: 0.5
+  checkpoint_interval: 10
+  output_dir: outputs/chapter1_baselines/mappo_reward_v2/r050/seed0
+
+evaluation:
+  seed: 0
+  device: cuda:0
+  episodes: 500
+  batch_size: 500
+  deterministic: true
+  output_dir: outputs/chapter1_baselines/mappo_reward_v2/r050/eval_seed0
