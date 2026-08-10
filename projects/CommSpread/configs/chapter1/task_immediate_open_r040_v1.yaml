@@ -1,0 +1,217 @@
+schema_version: 1
+task_version: chapter1_sar_immediate_open_v1
+scenario:
+  name: comm_spread_sar
+  implementation: comm_spread.sar_scenario.SarScenario
+  num_agents: 3
+  num_targets: 3
+  horizon: 100
+
+world:
+  semidim_x: 1.0
+  semidim_y: 1.0
+  belief_world_size: 2.0
+  boundary:
+    hard_clamp: false
+    penalty: -2.0
+    trigger: agent_center_abs_greater_equal_semidim
+
+physics:
+  profile: mpe_strict
+  dt: 0.1
+  substeps: 1
+  drag: 0.25
+  linear_friction: 0.0
+  angular_friction: 0.0
+  max_speed: null
+  action_space:
+    continuous: false
+    kind: categorical
+    cardinality: 5
+    labels: [noop, left, right, down, up]
+    force_sensitivity: 5.0
+  collision:
+    agent_agent_physical: true
+    target_physical: false
+    collision_force: 100
+    contact_margin: 0.001
+    reward_safe_distance: 0.15
+    reward_coefficient: -20.0
+    reward_floor: -20.0
+  agent_radius: 0.05
+  target_radius: 0.05
+
+initial_distribution:
+  method: joint_uniform_rejection_sampling
+  agent_x: [-1.0, 1.0]
+  agent_y: [-1.0, 1.0]
+  target_x: [-1.0, 1.0]
+  target_y: [-1.0, 1.0]
+  agent_agent_min_distance: 0.15
+  target_target_min_distance: 0.15
+  agent_target_min_distance: 0.15
+  allow_target_initially_within_sensor_radius: true
+  rng: vmas_environment_local_seed
+  split_policy: same_distribution_distinct_explicit_seeds
+
+perception:
+  sensor_radius: 0.4
+  sensor_radius_unit: world_euclidean_distance
+  team_shared_belief: true
+  belief_include_inactive_agents: true
+  belief:
+    grid_shape: [100, 100]
+    cell_size: 0.02
+    initial_probability: 0.5
+    sensor_fidelity: 0.8
+    detection_threshold: 0.95
+    threshold_comparison: strict_greater_than
+    connectivity: 8
+    update: bayesian_binary_occupancy
+    reset_sensor_update_before_first_decision: true
+  detection:
+    immediate_geometric_detection: false
+    persistent_until_rescue: true
+    position_source: detected_component_centroid
+    team_shared_detected_list: true
+
+task_semantics:
+  discover_and_rescue_are_distinct: true
+  rescue_distance_threshold: 0.05
+  target_visited_is_persistent: true
+  target_removed_from_high_level_nodes_after_rescue: true
+  success: all_targets_visited
+  early_done_on_success: false
+  unsuccessful_episode_runs_to_horizon: true
+  retire_on_rescue: true
+  retired_uav:
+    action_forced_zero: true
+    remains_physical_collision_body: true
+    participates_in_collision_reward: false
+    continues_sensing: true
+    actor_teammate_node_active: false
+    high_level_decisions: false
+    critic_global_agent_node_present: true
+  failure_reasons:
+    - undiscovered_remaining
+    - detected_unvisited_remaining
+    - no_active_agents_for_search
+    - no_active_agents_for_detected_target
+    - other_timeout
+
+rewards:
+  low_level_goal: 3.0
+  rescue_base_by_order: 10.0
+  discovery: 1.0
+  distance_progress_scale: 1.0
+  time_penalty: 0.0
+  early_rescue_penalty: 0.0
+  search_capacity_discovery_bonus: 0.0
+  all_targets_detected_bonus: 0.0
+  rescue_phase_explore_penalty: 0.0
+  unique_rescue_assignment_bonus: 0.0
+  duplicate_rescue_assignment_penalty: 0.0
+  detected_unassigned_target_penalty: 0.0
+
+hierarchy:
+  execution: asynchronous_event_triggered_smdp
+  fixed_interval_execution: false
+  option_types: [rrt_search, detected_target_rescue]
+  rrt:
+    top_k: 5
+    max_iterations: 40
+    expand_distance_cells: 2
+    value_radius_cells: 2
+    uniform_sample_ratio: 0.3
+    temperature: 1.0
+    gamma_rrt: 0.9
+    gamma_voronoi: 0.3
+    seed: 0
+    deduplication: exact_xy_keep_highest_score
+  option_completion_events:
+    - low_level_goal_within_threshold
+    - agent_inactive
+    - episode_done
+  replanning:
+    event_triggered: true
+    on_detection_change: true
+    on_assignment_change: true
+    on_option_completion: true
+  rescue_release:
+    dynamic_staggered: true
+    only_after_all_targets_detected: true
+    min_searchers: 2
+    entropy_ratio_threshold: 0.58
+    entropy_rate_threshold: 0.0015
+    min_stagnation_step: 25
+    search_steps_per_target: 22.0
+    assumed_speed_per_step: 0.035
+    time_margin: 8.0
+    max_new_agents_per_event: 1
+  finder_first:
+    enabled: true
+    cascade_mode: immediate_open
+    finder_definition: nearest_active_sensor_contributor_at_first_detection
+  commitment_latch:
+    enabled: true
+    release_events: [option_completion, agent_retirement, episode_done]
+  terminal_phase:
+    prohibit_search_when_all_detected_and_rescue_available: true
+  no_legal_action_fallback: first_rrt_explore_node
+
+low_level_interface:
+  variant: sar_low_mpe_physics
+  observation:
+    width: 8
+    fields:
+      - {name: ego_velocity, width: 2}
+      - {name: goal_minus_ego_position, width: 2}
+      - {name: other_agent_relative_positions, width: 4}
+    includes_target_positions: false
+  goal:
+    representation: absolute_world_xy_stored_relative_in_observation
+    coordinate_range: [-1.0, 1.0]
+    threshold: 0.05
+  action:
+    continuous: false
+    categorical_cardinality: 5
+  execution:
+    deterministic_checkpoint_policy: true
+    stagnation_fallback:
+      enabled: true
+      near_threshold: 0.25
+      proportional_gain_legacy_only: 2.0
+      stagnation_steps: 5
+      progress_epsilon: 0.005
+      strict_action_rule: dominant_axis_cardinal
+  checkpoint_compatibility:
+    required_runtime_profile: mpe_strict
+    required_metadata_fields:
+      - task_version
+      - task_config_sha256
+      - physics_profile
+      - low_level_variant
+      - observation_width
+      - action_space_kind
+      - action_cardinality
+      - goal_threshold
+      - checkpoint_sha256
+
+information_boundary:
+  actor:
+    ego_node: [absolute_position, velocity, horizon_fraction_remaining]
+    teammate_nodes: [absolute_position, velocity, distance_to_assigned_goal]
+    teammate_filter: active_only_excluding_self
+    explore_nodes: rrt_candidates_from_team_belief_entropy_and_voronoi
+    target_nodes: persistent_detected_component_centroids_only
+    hidden_target_truth: false
+    map_channels_used_by_actor: false
+  critic:
+    centralized: true
+    map_channels: [team_belief_entropy, team_belief_probability, detected_target_heatmap]
+    agent_nodes: all_agents_including_inactive
+    hidden_target_truth: false
+  environment_internal_truth_use:
+    belief_sensor_likelihood: true
+    detected_component_target_identity_matching: true
+    actor_direct_access: false

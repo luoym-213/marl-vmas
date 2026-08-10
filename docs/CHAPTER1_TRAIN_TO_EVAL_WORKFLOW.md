@@ -251,3 +251,69 @@ seed 0 × 500 episodes + seed 1 × 500 episodes
         ↓
 每 seed 的 evaluation_metrics.json 与 failure-mode 诊断产物
 ```
+
+## 6. 观测半径 0.3/0.4/0.5 连续实验
+
+仓库已经提供三组 `immediate_open`、训练 seed 0 的静态配置：
+
+| 半径 | task | eval 模板 | high-train |
+| --- | --- | --- | --- |
+| 0.3 | `task_immediate_open_r030_v1.yaml` | `eval_immediate_open_r030_v1.yaml` | `high_train_immediate_open_r030_seed0_v1.yaml` |
+| 0.4 | `task_immediate_open_r040_v1.yaml` | `eval_immediate_open_r040_v1.yaml` | `high_train_immediate_open_r040_seed0_v1.yaml` |
+| 0.5 | `task_immediate_open_r050_v1.yaml` | `eval_immediate_open_r050_v1.yaml` | `high_train_immediate_open_r050_seed0_v1.yaml` |
+
+三组 task 除 `perception.sensor_radius` 外完全一致；每组均使用 seed 0 训练，并按 seed 0、1 各 500 episodes 正式评估。
+
+先执行只读预检。它会解析九份配置、检查每组 task SHA、低层 checkpoint SHA、训练预算和评估规模，并打印完整命令，但不会训练、创建状态或发送通知：
+
+```bash
+cd /workspace/projects/CommSpread
+PYTHONPATH=. python scripts/run_chapter1_radius_sweep.py --dry-run
+```
+
+确认预检输出后启动正式流水线：
+
+```bash
+cd /workspace/projects/CommSpread
+PYTHONPATH=. python scripts/run_chapter1_radius_sweep.py
+```
+
+脚本严格按以下顺序执行：
+
+```text
+r030: train → finalize → eval seed 0 → eval seed 1
+  ↓
+r040: train → finalize → eval seed 0 → eval seed 1
+  ↓
+r050: train → finalize → eval seed 0 → eval seed 1
+```
+
+其中 finalizer 自动挑选 checkpoint 并生成当前 run 的 `derived_eval_final.yaml`。任一半径失败时，脚本记录失败并继续后续半径；全部成功时退出码为 `0`，存在任意失败时为 `1`，流水线自身在预检或状态读取阶段异常时为 `2`。
+
+默认批次名是 `immediate-open-radius-sweep-seed0-v1`。状态和日志位于：
+
+```text
+outputs/chapter1/radius_sweep/immediate-open-radius-sweep-seed0-v1/
+├── pipeline_state.json
+├── pipeline_summary.json
+├── pipeline.lock
+└── logs/r030|r040|r050/
+```
+
+训练和评估产物仍保存在各自 run 目录，例如 r030：
+
+```text
+outputs/chapter1/high_train_immediate_open_r030_v1/seed_0/runs/<run-id>/
+├── checkpoint_selection.json
+├── derived_eval_final.yaml
+└── evaluation_final_1000/seed_0|seed_1/
+```
+
+中断后使用完全相同的命令续跑。脚本会重新校验已有产物，只跳过“状态成功且产物仍有效”的阶段；中断或失败的训练会使用新的唯一 run-id，已经成功的 finalization 和 eval 不会重复执行。相同 batch 不允许并发运行，也不允许在创建状态后静默更换配置。若有意修改配置并开始一轮新实验，应提供新的批次名：
+
+```bash
+PYTHONPATH=. python scripts/run_chapter1_radius_sweep.py \
+  --batch-id immediate-open-radius-sweep-seed0-v2
+```
+
+工作流不检查 Git 工作区是否干净，也不调用 retrospective-v2。每个半径结束后发送 `0.3success`/`0.3fail`、`0.4success`/`0.4fail`、`0.5success`/`0.5fail`；整个脚本结束后发送 `train_done`。通知使用 `curl` 重试三次，通知失败只打印警告，不改变训练、评估或最终退出状态。可通过 `--bark-base-url` 或环境变量 `BARK_BASE_URL` 覆盖默认通知地址。
